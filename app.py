@@ -116,7 +116,7 @@ seed_if_empty()
 
 # --------------------------- UI ---------------------------
 st.set_page_config(page_title="Regulation Tracker (PoC)", layout="wide")
-st.title("Regulation Tracker — Streamlit PoC")
+st.title("Regulation Tracker")
 
 with st.sidebar:
     st.subheader("Filters")
@@ -250,5 +250,6 @@ with right:
                         s.add(new_a)
                         s.commit()
                         st.success("Action added")
+
 
 st.caption("DB: {}".format(DATABASE_URL))
