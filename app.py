@@ -17,7 +17,8 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, futu
 Base = declarative_base()
 
 # --------------------------- Constants ---------------------------
-DEPARTMENTS = ["Crewing", "Marine Ops", "Technical", "Human Resources", "HSEQ"]  
+DEPARTMENTS = ["Crewing", "Marine Ops", "Technical", "Human Resources", "HSEQ"] 
+REG_STATUS_OPTIONS = ["Open", "In Progress", "Closed", "N/A"]
 # --------------------------- Helpers ---------------------------
 def split_multi(val: Optional[str]) -> List[str]:
     """Split 'a;b, c | d' into ['a','b','c','d'] (trimmed, unique order kept)."""
@@ -198,7 +199,7 @@ with st.sidebar:
     all_assignees = sorted({a for v in asg_raw for a in split_multi(v)})
 
     source = st.selectbox("Source", options=["All"] + sources)
-    status = st.selectbox("Status", options=["All", "Open", "In Progress", "Closed"])
+    status = st.selectbox("Status", options=["All"] + REG_STATUS_OPTIONS)
 
     # Departments are fixed dropdown values
     department_filter = st.multiselect("Department", options=DEPARTMENTS, default=[])
@@ -305,10 +306,12 @@ with right:
                 st.write(reg.summary or "")
 
                 # edit status
-                new_reg_status = st.selectbox(
+               current_status = reg.status if reg.status in REG_STATUS_OPTIONS else "N/A"
+
+               new_reg_status = st.selectbox(
                     "Status",
-                    options=["Open", "In Progress", "Closed"],
-                    index=["Open", "In Progress", "Closed"].index(reg.status or "Open"),
+                    options=REG_STATUS_OPTIONS,
+                    index=REG_STATUS_OPTIONS.index(current_status),
                     key="reg_status",
                 )
 
@@ -401,6 +404,7 @@ with right:
                         st.success("Action added")
 
 st.caption("DB: {}".format(DATABASE_URL))
+
 
 
 
