@@ -7,7 +7,7 @@ import streamlit as st
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, Date, DateTime, ForeignKey, select, func
 )
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session, selectinload
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker, selectinload
 
 # --------------------------- Config ---------------------------
 DEFAULT_DB = "sqlite:///regtracker.db"
@@ -15,6 +15,9 @@ DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_DB)
 engine = create_engine(DATABASE_URL, echo=False, future=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 Base = declarative_base()
+
+# --------------------------- Constants ---------------------------
+DEPARTMENTS = ["Crewing", "Marine Ops", "Technical", "Human Resourses", "HSEQ"]  # keep spelling as you requested
 
 # --------------------------- Helpers ---------------------------
 def split_multi(val: Optional[str]) -> List[str]:
@@ -36,16 +39,34 @@ def split_multi(val: Optional[str]) -> List[str]:
     return out
 
 def join_multi(items: List[str]) -> str:
-    items = [i.strip() for i in items if i and i.strip()]
     # unique preserving order, case-insensitive
     seen = set()
     out: List[str] = []
     for i in items:
-        k = i.lower()
+        if not i:
+            continue
+        v = i.strip()
+        if not v:
+            continue
+        k = v.lower()
         if k not in seen:
             seen.add(k)
-            out.append(i)
+            out.append(v)
     return ";".join(out)
+
+def normalize_departments(items: List[str]) -> List[str]:
+    """Filter to allowed departments and keep canonical casing from DEPARTMENTS."""
+    allowed = {d.lower(): d for d in DEPARTMENTS}
+    out: List[str] = []
+    seen = set()
+    for x in items:
+        if not x:
+            continue
+        k = x.strip().lower()
+        if k in allowed and k not in seen:
+            seen.add(k)
+            out.append(allowed[k])
+    return out
 
 # --------------------------- Models ---------------------------
 class Regulation(Base):
@@ -56,8 +77,8 @@ class Regulation(Base):
     jurisdiction = Column(String)
 
     # NOTE: DB column name remains "category" to avoid migrations,
-    # but the UI treats this as "Department" and supports multi-values like:
-    # "Operations;Technical;Finance"
+    # but the UI treats this as "Department" and stores multi-values like:
+    # "Crewing;Technical"
     category = Column(String)
 
     effective_date = Column(Date)
@@ -102,12 +123,13 @@ def seed_if_empty():
         exists = s.execute(select(func.count(Regulation.id))).scalar_one()
         if exists:
             return
+
         r1 = Regulation(
             id=1,
             title="EU MRV 2025 Amendments",
             source="EU",
             jurisdiction="EU",
-            category="Environmental;Operations",
+            category="Marine Ops;HSEQ",
             effective_date=date(2025, 1, 1),
             received_at=datetime(2025, 7, 15, 10, 0, 0),
             summary="Revised monitoring & reporting for CO₂ and CH₄.",
@@ -127,7 +149,7 @@ def seed_if_empty():
             title="IMO MARPOL Annex VI NOx Tier III Guidance",
             source="IMO",
             jurisdiction="Global",
-            category="Technical;Compliance",
+            category="Technical;HSEQ",
             effective_date=date(2025, 6, 30),
             received_at=datetime(2025, 7, 20, 9, 0, 0),
             summary="Clarifies EIAPP documentation and testing windows for retrofits.",
@@ -145,7 +167,7 @@ def seed_if_empty():
             title="USCG Policy Letter 25-04 on E-Navigation Logs",
             source="USCG",
             jurisdiction="USA",
-            category="Navigation;Operations",
+            category="Marine Ops",
             effective_date=date(2025, 9, 1),
             received_at=datetime(2025, 7, 25, 12, 30, 0),
             summary="Accepts specific e-nav log formats with integrity checks.",
@@ -168,21 +190,19 @@ with st.sidebar:
     st.subheader("Filters")
     q = st.text_input("Search (title/summary/jurisdiction)")
 
-    # dynamic options (multi-aware)
+    # dynamic options
     with SessionLocal() as s:
         sources_raw = [r[0] for r in s.execute(select(Regulation.source).distinct()).all() if r[0]]
-        dept_raw = [r[0] for r in s.execute(select(Regulation.category).distinct()).all() if r[0]]
         asg_raw = [r[0] for r in s.execute(select(Action.assignee).distinct()).all() if r[0]]
 
     sources = sorted(set(sources_raw))
-    all_departments = sorted({d for v in dept_raw for d in split_multi(v)})
     all_assignees = sorted({a for v in asg_raw for a in split_multi(v)})
 
     source = st.selectbox("Source", options=["All"] + sources)
     status = st.selectbox("Status", options=["All", "Open", "In Progress", "Closed"])
 
-    # Multi-select filters (match ANY selected)
-    department_filter = st.multiselect("Department", options=all_departments, default=[])
+    # Departments are fixed dropdown values
+    department_filter = st.multiselect("Department", options=DEPARTMENTS, default=[])
     assignee_filter = st.multiselect("Assignee", options=all_assignees, default=[])
 
 # fetch list (eager-load actions so we can derive assignees for table + filters)
@@ -209,7 +229,7 @@ for r in regs:
 
     # Department multi filter: matches if it has ANY selected department
     if department_filter:
-        r_depts = set(split_multi(r.category))
+        r_depts = set(normalize_departments(split_multi(r.category)))
         if not r_depts.intersection(set(department_filter)):
             continue
 
@@ -226,7 +246,7 @@ for r in regs:
 left, right = st.columns([7, 5])
 
 def departments_for_reg(r: Regulation) -> str:
-    depts = split_multi(r.category)
+    depts = normalize_departments(split_multi(r.category))
     return ", ".join(depts) if depts else "—"
 
 def assignees_for_reg(r: Regulation) -> str:
@@ -293,16 +313,18 @@ with right:
                     key="reg_status",
                 )
 
-                # edit departments (stored in reg.category)
-                dept_text = st.text_input(
-                    "Department(s) (separate with ; , or |)",
-                    value=reg.category or "",
+                # edit departments via fixed multiselect
+                current_depts = normalize_departments(split_multi(reg.category))
+                new_depts = st.multiselect(
+                    "Department(s)",
+                    options=DEPARTMENTS,
+                    default=current_depts,
                     key="reg_depts",
                 )
 
                 if st.button("Save Regulation Updates"):
                     reg.status = new_reg_status
-                    reg.category = join_multi(split_multi(dept_text))
+                    reg.category = join_multi(normalize_departments(new_depts))
                     s.add(reg)
                     s.commit()
                     st.success("Regulation updated")
@@ -380,5 +402,6 @@ with right:
                         st.success("Action added")
 
 st.caption("DB: {}".format(DATABASE_URL))
+
 
 
