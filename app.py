@@ -17,8 +17,9 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, futu
 Base = declarative_base()
 
 # --------------------------- Constants ---------------------------
-DEPARTMENTS = ["Crewing", "Marine Ops", "Technical", "Human Resources", "HSEQ"] 
+DEPARTMENTS = ["Crewing", "Marine Ops", "Technical", "Human Resourses", "HSEQ"]  # keep spelling as requested
 REG_STATUS_OPTIONS = ["Open", "In Progress", "Closed", "N/A"]
+
 # --------------------------- Helpers ---------------------------
 def split_multi(val: Optional[str]) -> List[str]:
     """Split 'a;b, c | d' into ['a','b','c','d'] (trimmed, unique order kept)."""
@@ -39,7 +40,7 @@ def split_multi(val: Optional[str]) -> List[str]:
     return out
 
 def join_multi(items: List[str]) -> str:
-    # unique preserving order, case-insensitive
+    """Join items into 'a;b;c' unique (case-insensitive) preserving order."""
     seen = set()
     out: List[str] = []
     for i in items:
@@ -84,7 +85,7 @@ class Regulation(Base):
     effective_date = Column(Date)
     received_at = Column(DateTime, default=datetime.utcnow)
     summary = Column(Text)
-    status = Column(String, default="Open")  # Open | In Progress | Closed
+    status = Column(String, default="N/A")  # Open | In Progress | Closed | N/A
 
     links = relationship("RegulationLink", back_populates="regulation", cascade="all, delete-orphan")
     actions = relationship("Action", back_populates="regulation", cascade="all, delete-orphan")
@@ -171,7 +172,7 @@ def seed_if_empty():
             effective_date=date(2025, 9, 1),
             received_at=datetime(2025, 7, 25, 12, 30, 0),
             summary="Accepts specific e-nav log formats with integrity checks.",
-            status="Open",
+            status="N/A",
         )
         r3.links = [
             RegulationLink(url="https://www.dco.uscg.mil/Portals/9/CG-ENG/Policy", link_type="official", title="USCG Policy Portal")
@@ -306,9 +307,8 @@ with right:
                 st.write(reg.summary or "")
 
                 # edit status
-               current_status = reg.status if reg.status in REG_STATUS_OPTIONS else "N/A"
-
-               new_reg_status = st.selectbox(
+                current_status = reg.status if reg.status in REG_STATUS_OPTIONS else "N/A"
+                new_reg_status = st.selectbox(
                     "Status",
                     options=REG_STATUS_OPTIONS,
                     index=REG_STATUS_OPTIONS.index(current_status),
@@ -404,6 +404,8 @@ with right:
                         st.success("Action added")
 
 st.caption("DB: {}".format(DATABASE_URL))
+
+
 
 
 
