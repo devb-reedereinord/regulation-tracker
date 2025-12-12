@@ -17,8 +17,7 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, futu
 Base = declarative_base()
 
 # --------------------------- Constants ---------------------------
-DEPARTMENTS = ["Crewing", "Marine Ops", "Technical", "Human Resourses", "HSEQ"]  # keep spelling as you requested
-
+DEPARTMENTS = ["Crewing", "Marine Ops", "Technical", "Human Resources", "HSEQ"]  
 # --------------------------- Helpers ---------------------------
 def split_multi(val: Optional[str]) -> List[str]:
     """Split 'a;b, c | d' into ['a','b','c','d'] (trimmed, unique order kept)."""
@@ -402,6 +401,7 @@ with right:
                         st.success("Action added")
 
 st.caption("DB: {}".format(DATABASE_URL))
+
 
 
 
