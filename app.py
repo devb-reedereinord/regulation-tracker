@@ -1,190 +1,39 @@
-import os
-from datetime import date, datetime
-from typing import List, Optional
+"""
+app.py — Streamlit Regulation Tracker (modular)
+- Uses models.py for DB and helpers
+- Uses agent.py for email ingestion + notifications
+"""
 
 import pandas as pd
 import streamlit as st
-from sqlalchemy import (
-    create_engine, Column, Integer, String, Text, Date, DateTime, ForeignKey, select, func
+from datetime import date, datetime
+from typing import List, Optional
+
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+
+from config import (
+    DEPARTMENTS, REG_STATUS_OPTIONS,
+    GRAPH_MAILBOX, GRAPH_TARGET_SUBFOLDER, NOTIFY_MODE
 )
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker, selectinload
+from models import (
+    SessionLocal, Regulation, RegulationLink, Action,
+    split_multi, join_multi, normalize_departments
+)
+from agent import ingest_once, copy_last_inbox_message_to_regulations
 
-# --------------------------- Config ---------------------------
-DEFAULT_DB = "sqlite:///regtracker.db"
-DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_DB)
-engine = create_engine(DATABASE_URL, echo=False, future=True)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
-Base = declarative_base()
+# --- Streamlit page setup ---
+st.set_page_config(page_title="Regulation Tracker (Modular)", layout="wide")
+st.title("Regulation Tracker")
 
-# Password for editing Department + Assignees
-# Prefer Streamlit secrets:  edit_password = "..."
-EDIT_PASSWORD = st.secrets.get("edit_password", os.getenv("REGTRACKER_EDIT_PASSWORD", ""))
-
-# --------------------------- Constants ---------------------------
-DEPARTMENTS = ["Crewing", "Marine Ops", "Technical", "Human Resourses", "HSEQ"]  # keep spelling as requested
-REG_STATUS_OPTIONS = ["Open", "In Progress", "Closed", "N/A"]
-
-# --------------------------- Helpers ---------------------------
-def split_multi(val: Optional[str]) -> List[str]:
-    """Split 'a;b, c | d' into ['a','b','c','d'] (trimmed, unique order kept)."""
-    if not val:
-        return []
-    raw = str(val)
-    for sep in ["|", ","]:
-        raw = raw.replace(sep, ";")
-    parts = [p.strip() for p in raw.split(";") if p.strip()]
-    seen = set()
-    out: List[str] = []
-    for p in parts:
-        k = p.lower()
-        if k not in seen:
-            seen.add(k)
-            out.append(p)
-    return out
-
-def join_multi(items: List[str]) -> str:
-    """Join items into 'a;b;c' unique (case-insensitive) preserving order."""
-    seen = set()
-    out: List[str] = []
-    for i in items:
-        if not i:
-            continue
-        v = i.strip()
-        if not v:
-            continue
-        k = v.lower()
-        if k not in seen:
-            seen.add(k)
-            out.append(v)
-    return ";".join(out)
-
-def normalize_departments(items: List[str]) -> List[str]:
-    """Filter to allowed departments and keep canonical casing from DEPARTMENTS."""
-    allowed = {d.lower(): d for d in DEPARTMENTS}
-    out: List[str] = []
-    seen = set()
-    for x in items:
-        if not x:
-            continue
-        k = x.strip().lower()
-        if k in allowed and k not in seen:
-            seen.add(k)
-            out.append(allowed[k])
-    return out
-
+# --- Editor password (optional) ---
+EDIT_PASSWORD = st.secrets.get("edit_password", "")  # or env var REGTRACKER_EDIT_PASSWORD
 def is_editor() -> bool:
     return bool(st.session_state.get("is_editor", False))
-
 def require_editor_message():
     st.info("🔒 Editing **Department** and **Assignees** requires the editor password (see sidebar).")
 
-# --------------------------- Models ---------------------------
-class Regulation(Base):
-    __tablename__ = "regulations"
-    id = Column(Integer, primary_key=True)
-    title = Column(Text, nullable=False)
-    source = Column(String)
-    jurisdiction = Column(String)
-
-    # DB column stays 'category', UI label: Department (supports multi-values "A;B;C")
-    category = Column(String)
-
-    effective_date = Column(Date)
-    received_at = Column(DateTime, default=datetime.utcnow)
-    summary = Column(Text)
-    status = Column(String, default="N/A")  # Open | In Progress | Closed | N/A
-
-    links = relationship("RegulationLink", back_populates="regulation", cascade="all, delete-orphan")
-    actions = relationship("Action", back_populates="regulation", cascade="all, delete-orphan")
-
-class RegulationLink(Base):
-    __tablename__ = "regulation_links"
-    id = Column(Integer, primary_key=True)
-    regulation_id = Column(Integer, ForeignKey("regulations.id"), index=True)
-    url = Column(Text, nullable=False)
-    link_type = Column(String)   # official | guidance | news | pdf
-    title = Column(Text)
-
-    regulation = relationship("Regulation", back_populates="links")
-
-class Action(Base):
-    __tablename__ = "actions"
-    id = Column(Integer, primary_key=True)
-    regulation_id = Column(Integer, ForeignKey("regulations.id"), index=True)
-    title = Column(Text, nullable=False)
-    description = Column(Text)
-    status = Column(String, default="Planned")  # Planned | In Progress | Done | Blocked
-    assignee = Column(String)  # multi: "A. Smith;M. Lopez"
-    due_date = Column(Date)
-    completed_at = Column(DateTime)
-
-    regulation = relationship("Regulation", back_populates="actions")
-
-# --------------------------- DB init & seed ---------------------------
-Base.metadata.create_all(engine)
-
-def seed_if_empty():
-    with SessionLocal() as s:
-        exists = s.execute(select(func.count(Regulation.id))).scalar_one()
-        if exists:
-            return
-
-        r1 = Regulation(
-            id=1,
-            title="EU MRV 2025 Amendments",
-            source="EU",
-            jurisdiction="EU",
-            category="Marine Ops;HSEQ",
-            effective_date=date(2025, 1, 1),
-            received_at=datetime(2025, 7, 15, 10, 0, 0),
-            summary="Revised monitoring & reporting for CO₂ and CH₄.",
-            status="In Progress",
-        )
-        r1.links = [
-            RegulationLink(url="https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32025R-MRV", link_type="official", title="EUR-Lex: MRV 2025"),
-            RegulationLink(url="https://example.com/mrv-guide.pdf", link_type="guidance", title="Practical MRV Guide (PDF)"),
-        ]
-        r1.actions = [
-            Action(title="Update data pipeline for CH₄", description="Include methane reporting in MRV extracts", status="In Progress", assignee="A. Smith;J. Kim", due_date=date(2025, 8, 20)),
-            Action(title="Crew circular MRV changes", description="Ops circular outlining new monitoring plan", status="Planned", assignee="M. Lopez", due_date=date(2025, 8, 25)),
-        ]
-
-        r2 = Regulation(
-            id=2,
-            title="IMO MARPOL Annex VI NOx Tier III Guidance",
-            source="IMO",
-            jurisdiction="Global",
-            category="Technical;HSEQ",
-            effective_date=date(2025, 6, 30),
-            received_at=datetime(2025, 7, 20, 9, 0, 0),
-            summary="Clarifies EIAPP documentation and testing windows for retrofits.",
-            status="Open",
-        )
-        r2.links = [RegulationLink(url="https://www.imo.org/en/OurWork/Environment/Pages/Air-Pollution.aspx", link_type="official", title="IMO Air Pollution")]
-        r2.actions = [Action(title="Assess retrofit feasibility", description="Check Tier III compliance options for 2012-2016 builds", status="Planned", assignee="J. Kim;A. Smith", due_date=date(2025, 9, 10))]
-
-        r3 = Regulation(
-            id=3,
-            title="USCG Policy Letter 25-04 on E-Navigation Logs",
-            source="USCG",
-            jurisdiction="USA",
-            category="Marine Ops",
-            effective_date=date(2025, 9, 1),
-            received_at=datetime(2025, 7, 25, 12, 30, 0),
-            summary="Accepts specific e-nav log formats with integrity checks.",
-            status="N/A",
-        )
-        r3.links = [RegulationLink(url="https://www.dco.uscg.mil/Portals/9/CG-ENG/Policy", link_type="official", title="USCG Policy Portal")]
-
-        s.add_all([r1, r2, r3])
-        s.commit()
-
-seed_if_empty()
-
-# --------------------------- UI ---------------------------
-st.set_page_config(page_title="Regulation Tracker (PoC)", layout="wide")
-st.title("Regulation Tracker")
-
+# --- Sidebar filters ---
 with st.sidebar:
     st.subheader("Filters")
     q = st.text_input("Search (title/summary/jurisdiction)")
@@ -205,7 +54,7 @@ with st.sidebar:
     st.subheader("Editor access")
 
     if not EDIT_PASSWORD:
-        st.warning("No editor password configured. Set `edit_password` in secrets or env `REGTRACKER_EDIT_PASSWORD`.")
+        st.warning("No editor password configured. Set `edit_password` in `.streamlit/secrets.toml`.")
         st.session_state["is_editor"] = False
     else:
         pw = st.text_input("Editor password", type="password")
@@ -218,7 +67,7 @@ with st.sidebar:
         else:
             st.caption("View-only for Department & Assignees unless unlocked.")
 
-# fetch list (eager-load actions for assignee column + filtering)
+# --- Fetch & filter records ---
 with SessionLocal() as s:
     regs = s.execute(select(Regulation).options(selectinload(Regulation.actions))).scalars().all()
 
@@ -253,8 +102,7 @@ for r in regs:
 
     filtered.append(r)
 
-left, right = st.columns([7, 5])
-
+# --- UI helpers ---
 def departments_for_reg(r: Regulation) -> str:
     depts = normalize_departments(split_multi(r.category))
     return ", ".join(depts) if depts else "—"
@@ -272,6 +120,9 @@ def assignees_for_reg(r: Regulation) -> str:
             out.append(n)
     return ", ".join(out) if out else "—"
 
+left, right = st.columns([7, 5])
+
+# --- Left: regulations list ---
 with left:
     st.subheader("Regulations")
     df = pd.DataFrame([
@@ -296,6 +147,7 @@ with left:
         idx = titles.index(selected_label)
         selected_id = ids[idx]
 
+# --- Right: details & actions + ingestion controls ---
 with right:
     st.subheader("Details & Actions")
     if not selected_id:
@@ -306,7 +158,7 @@ with right:
             if not reg:
                 st.error("Not found.")
             else:
-                _ = reg.actions
+                _ = reg.actions  # eager load
                 _ = reg.links
 
                 st.markdown(f"### {reg.title}")
@@ -374,7 +226,6 @@ with right:
                                     index=["Planned", "In Progress", "Done", "Blocked"].index(a.status or "Planned"),
                                     key=f"s_{a.id}",
                                 )
-
                                 # Assignee editor: password-gated
                                 if is_editor():
                                     new_assignee = st.text_input(
@@ -440,12 +291,33 @@ with right:
                         s.commit()
                         st.success("Action added")
 
-st.caption("DB: {}".format(DATABASE_URL))
+    st.divider()
+    st.markdown("#### Email Ingestion (Inbox ▸ Regulations)")
+    st.caption(f"Mailbox: {GRAPH_MAILBOX} — Subfolder: {GRAPH_TARGET_SUBFOLDER} — Notifications: {NOTIFY_MODE}")
 
+    c1, c2, c3 = st.columns([1, 1, 1])
+    with c1:
+        if st.button("Sync mail (dry run)"):
+            try:
+                stats = ingest_once(limit=50, dry_run=True)
+                msg = f"Folder: {stats['folder']} — created {stats['created']}, skipped {stats['skipped']}."
+                if stats.get("note"): msg += f" Note: {stats['note']}."
+                st.info(msg)
+            except Exception as ex:
+                st.error(f"Dry run failed: {ex}")
+    with c2:
+        if st.button("Sync & notify"):
+            try:
+                stats = ingest_once(limit=50, dry_run=False)
+                st.success(f"Folder: {stats['folder']} — created {stats['created']}, skipped {stats['skipped']}.")
+            except Exception as ex:
+                st.error(f"Sync failed: {ex}")
+    with c3:
+        if st.button("Create test item (copy last Inbox message → Regulations)"):
+            try:
+                out = copy_last_inbox_message_to_regulations()
+                st.success(out)
+            except Exception as ex:
+                st.error(f"Test item failed: {ex}")
 
-
-
-
-
-
-
+st.caption("DB: {}".format(st.secrets.get("DATABASE_URL", "sqlite:///regtracker.db")))
