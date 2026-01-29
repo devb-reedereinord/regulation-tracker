@@ -1,4 +1,7 @@
+
 streamlit
-psycopg2-binary
 sqlalchemy
 pandas
+msal
+requests
+python-dateutil
