@@ -18,15 +18,17 @@ from typing import List, Dict, Optional
 import requests
 import msal
 from dateutil import parser as dtp
+from openai import OpenAI
 
 from config import (
     GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET,
     GRAPH_MAILBOX, GRAPH_PARENT_FOLDER, GRAPH_TARGET_SUBFOLDER,
     NOTIFY_MODE, DEFAULT_NOTIFY,
-    DEPT_NOTIFY, KEYWORD_NOTIFY, SENDER_NOTIFY
+    DEPT_NOTIFY, KEYWORD_NOTIFY, SENDER_NOTIFY,
+    OPENAI_API_KEY, OPENAI_MODEL
 )
 from models import (
-    SessionLocal, Regulation, RegulationLink, EmailIngest, KvStore,
+    SessionLocal, Regulation, RegulationLink, Action, EmailIngest, KvStore,
     normalize_departments, join_multi
 )
 
@@ -158,6 +160,105 @@ def _collect_links_from_html(html: str) -> List[Dict]:
     return [{"url": m.group(1), "title": None, "link_type": "news"} for m in _URL_RE.finditer(html or "")]
 
 
+def _extract_json_block(text: str) -> Optional[Dict]:
+    if not text:
+        return None
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?", "", cleaned).strip()
+        cleaned = re.sub(r"```$", "", cleaned).strip()
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        m = re.search(r"\{[\s\S]*\}", cleaned)
+        if not m:
+            return None
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            return None
+
+
+def _extract_obligations_with_ai(subject: str, body_preview: str, body_html: str, attachment_text: str = "") -> List[Dict]:
+    if not OPENAI_API_KEY:
+        return []
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    body_text = re.sub(r"<[^>]+>", " ", body_html or "")
+
+    prompt = f"""
+You are extracting maritime regulatory obligations from an email.
+Return ONLY JSON in this exact schema:
+{{
+  "obligations": [
+    {{
+      "title": "short obligation title",
+      "description": "one or two sentences",
+      "due_date": "YYYY-MM-DD or null",
+      "department": ["Marine Ops", "Technical", "HSEQ", "Crewing", "Human Resourses"]
+    }}
+  ]
+}}
+
+Rules:
+- Capture concrete obligations/compliance tasks and deadlines.
+- If there is no obligation, return an empty list.
+- Do not include commentary outside JSON.
+
+Email subject:
+{subject}
+
+Email body preview:
+{body_preview}
+
+Email body text:
+{body_text[:10000]}
+
+Attachment text (may be partial):
+{(attachment_text or "")[:6000]}
+""".strip()
+
+    try:
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": "You extract compliance obligations and deadlines."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        parsed = _extract_json_block(raw) or {}
+    except Exception as ex:
+        print(f"[WARN] OpenAI extraction failed: {ex}")
+        return []
+
+    out: List[Dict] = []
+    for item in parsed.get("obligations", []):
+        if not isinstance(item, dict):
+            continue
+        title = (item.get("title") or "").strip()
+        desc = (item.get("description") or "").strip()
+        due = item.get("due_date")
+        departments = normalize_departments(item.get("department") or [])
+
+        due_date = None
+        if due:
+            try:
+                due_date = dtp.parse(str(due)).date()
+            except Exception:
+                due_date = None
+
+        if title:
+            out.append({
+                "title": title,
+                "description": desc,
+                "due_date": due_date,
+                "departments": departments,
+            })
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Attachments
 # ---------------------------------------------------------------------------
@@ -196,6 +297,36 @@ def _save_attachment_to_disk(att: Dict, folder: str = "attachments") -> Optional
     with open(path, "wb") as f:
         f.write(base64.b64decode(content_b64))
     return path
+
+
+def _extract_text_from_attachment(att: Dict, max_chars: int = 4000) -> str:
+    """Best-effort text extraction for common text attachments."""
+    otype = att.get("@odata.type", "")
+    if "#microsoft.graph.fileAttachment" not in otype:
+        return ""
+
+    name = (att.get("name") or "").lower()
+    content_type = (att.get("contentType") or "").lower()
+    content_b64 = att.get("contentBytes")
+    if not content_b64:
+        return ""
+
+    text_like = (
+        content_type.startswith("text/")
+        or content_type in {"application/json", "application/xml"}
+        or name.endswith((".txt", ".csv", ".json", ".xml", ".log", ".md"))
+    )
+    if not text_like:
+        return ""
+
+    try:
+        raw = base64.b64decode(content_b64)
+        decoded = raw.decode("utf-8", errors="ignore").strip()
+        if not decoded:
+            return ""
+        return decoded[:max_chars]
+    except Exception:
+        return ""
 
 
 def _infer_link_type_from_name(name: Optional[str]) -> str:
@@ -324,6 +455,7 @@ def ingest_once(limit: int = 50, dry_run: bool = False) -> dict:
                 ))
 
             # Attachments: list + download file attachments
+            attachment_text_parts: List[str] = []
             try:
                 atts = _list_attachments(msg_id)
                 for meta in atts:
@@ -331,6 +463,10 @@ def ingest_once(limit: int = 50, dry_run: bool = False) -> dict:
                     saved_path = _save_attachment_to_disk(full)  # returns local path or None
                     link_type = _infer_link_type_from_name(meta.get("name"))
                     title = meta.get("name") or "attachment"
+
+                    extracted = _extract_text_from_attachment(full)
+                    if extracted:
+                        attachment_text_parts.append(f"Attachment: {title}\n{extracted}")
 
                     if saved_path:
                         s.add(RegulationLink(
@@ -351,6 +487,9 @@ def ingest_once(limit: int = 50, dry_run: bool = False) -> dict:
                 # Do not break ingestion due to attachment issues
                 print(f"[WARN] Attachment handling failed for message {msg_id}: {ex}")
 
+            attachment_context = "\n\n".join(attachment_text_parts)
+            ai_obligations = _extract_obligations_with_ai(subj, body_preview, body_html, attachment_context)
+
             # Dedup record
             s.add(EmailIngest(
                 internet_message_id=internet_id or f"local-{reg.id}",
@@ -360,8 +499,10 @@ def ingest_once(limit: int = 50, dry_run: bool = False) -> dict:
                 subject=subj,
             ))
 
-            # Department classification (simple rules; extend later)
+            # Department classification (AI + fallback keyword rules)
             depts: List[str] = []
+            for ob in ai_obligations:
+                depts.extend(ob.get("departments", []))
             if any(k in kw for k in ["MARPOL", "EIAPP", "NOX", "TIER III"]):
                 depts.extend(["HSEQ", "Technical"])
             if "USCG" in kw:
@@ -369,6 +510,16 @@ def ingest_once(limit: int = 50, dry_run: bool = False) -> dict:
             if "MRV" in kw:
                 depts.append("HSEQ")
             reg.category = join_multi(normalize_departments(depts))
+
+            for ob in ai_obligations:
+                s.add(Action(
+                    regulation_id=reg.id,
+                    title=ob["title"],
+                    description=ob.get("description") or "",
+                    due_date=ob.get("due_date"),
+                    assignee="",
+                    status="Planned",
+                ))
 
             s.add(reg)
             s.commit()

@@ -37,6 +37,10 @@ GRAPH_TARGET_SUBFOLDER = _get("GRAPH_TARGET_SUBFOLDER", "Regulations")
 NOTIFY_MODE = _get("NOTIFY_MODE", "disabled")  # "disabled" or "email"
 DEFAULT_NOTIFY = [GRAPH_MAILBOX]               # fallback: notify self
 
+# --- OpenAI extraction ---
+OPENAI_API_KEY = _get("OPENAI_API_KEY", "")
+OPENAI_MODEL = _get("OPENAI_MODEL", "gpt-4o-mini")
+
 # Department mapping (fill with real distro lists later)
 DEPT_NOTIFY = {
     # "Marine Ops": ["operations@reederei-nord.nl"],
@@ -62,4 +66,3 @@ SENDER_NOTIFY = {
 # --- UI constants (share with models/helpers) ---
 DEPARTMENTS = ["Crewing", "Marine Ops", "Technical", "Human Resourses", "HSEQ"]  # requested spelling
 REG_STATUS_OPTIONS = ["Open", "In Progress", "Closed", "N/A"]
-
