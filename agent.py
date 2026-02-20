@@ -66,20 +66,18 @@ def _graph_token() -> str:
     return tok
 
 
-def _graph_post(url: str, payload: Dict) -> Dict:
+def _graph_get(url: str, params: Optional[Dict] = None) -> Dict:
     tok = _graph_token()
 
     # HARD STOP: if this triggers, you will NOT hit Graph at all
     if not isinstance(tok, str) or len(tok.strip()) < 20:
         raise RuntimeError(f"Graph token invalid/empty. token_len={len(tok.strip()) if isinstance(tok,str) else 'NA'}")
 
-    r = requests.post(
-        url,
-        headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
-        data=json.dumps(payload),
-    )
+    headers = {"Authorization": f"Bearer {tok}"}
+    r = requests.get(url, headers=headers, params=params or {})
     r.raise_for_status()
-    return r.json() if r.text else {}
+    return r.json()
+
 
 def _graph_post(url: str, payload: Dict) -> Dict:
     tok = _graph_token()
