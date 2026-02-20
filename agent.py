@@ -41,19 +41,32 @@ _URL_RE     = re.compile(r'(https?://[^\s)>\]]+)', flags=re.I)
 # Auth & HTTP
 # ---------------------------------------------------------------------------
 def _graph_token() -> str:
+    if not GRAPH_CLIENT_ID or not GRAPH_CLIENT_SECRET or not GRAPH_TENANT_ID:
+        raise RuntimeError(
+            "Missing Graph config. Ensure GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET are set "
+            "in Streamlit secrets or environment variables."
+        )
+
     app = msal.ConfidentialClientApplication(
         client_id=GRAPH_CLIENT_ID,
         authority=f"https://login.microsoftonline.com/{GRAPH_TENANT_ID}",
         client_credential=GRAPH_CLIENT_SECRET
     )
+
     result = app.acquire_token_silent(GRAPH_SCOPE, account=None) or app.acquire_token_for_client(scopes=GRAPH_SCOPE)
-    if "access_token" not in result:
-        raise RuntimeError(f"Graph auth failed: {result}")
-    return result["access_token"]
+
+    tok = result.get("access_token")
+    if not tok:
+        # This prints the real reason from MSAL (invalid client secret, missing consent, etc.)
+        raise RuntimeError(f"Graph auth failed (no token). MSAL response: {result}")
+
+    return tok
 
 
 def _graph_get(url: str, params: Optional[Dict] = None) -> Dict:
     tok = _graph_token()
+    if not tok.strip():
+        raise RuntimeError("Graph token is empty after auth.")
     r = requests.get(url, headers={"Authorization": f"Bearer {tok}"}, params=params or {})
     r.raise_for_status()
     return r.json()
