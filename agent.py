@@ -41,36 +41,45 @@ _URL_RE     = re.compile(r'(https?://[^\s)>\]]+)', flags=re.I)
 # Auth & HTTP
 # ---------------------------------------------------------------------------
 def _graph_token() -> str:
-    if not GRAPH_CLIENT_ID or not GRAPH_CLIENT_SECRET or not GRAPH_TENANT_ID:
-        raise RuntimeError(
-            "Missing Graph config. Ensure GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET are set "
-            "in Streamlit secrets or environment variables."
-        )
+    missing = [k for k, v in {
+        "GRAPH_TENANT_ID": GRAPH_TENANT_ID,
+        "GRAPH_CLIENT_ID": GRAPH_CLIENT_ID,
+        "GRAPH_CLIENT_SECRET": GRAPH_CLIENT_SECRET
+    }.items() if not v]
+
+    if missing:
+        raise RuntimeError(f"Missing Graph config keys: {missing}. Check Streamlit secrets/env vars.")
 
     app = msal.ConfidentialClientApplication(
         client_id=GRAPH_CLIENT_ID,
         authority=f"https://login.microsoftonline.com/{GRAPH_TENANT_ID}",
-        client_credential=GRAPH_CLIENT_SECRET
+        client_credential=GRAPH_CLIENT_SECRET,
     )
 
-    result = app.acquire_token_silent(GRAPH_SCOPE, account=None) or app.acquire_token_for_client(scopes=GRAPH_SCOPE)
-
+    result = app.acquire_token_for_client(scopes=GRAPH_SCOPE)
     tok = result.get("access_token")
+
     if not tok:
-        # This prints the real reason from MSAL (invalid client secret, missing consent, etc.)
-        raise RuntimeError(f"Graph auth failed (no token). MSAL response: {result}")
+        # This will include AADSTSxxxx code explaining why you got no token
+        raise RuntimeError(f"MSAL did not return a token. MSAL response: {result}")
 
     return tok
 
 
-def _graph_get(url: str, params: Optional[Dict] = None) -> Dict:
+def _graph_post(url: str, payload: Dict) -> Dict:
     tok = _graph_token()
-    if not tok.strip():
-        raise RuntimeError("Graph token is empty after auth.")
-    r = requests.get(url, headers={"Authorization": f"Bearer {tok}"}, params=params or {})
-    r.raise_for_status()
-    return r.json()
 
+    # HARD STOP: if this triggers, you will NOT hit Graph at all
+    if not isinstance(tok, str) or len(tok.strip()) < 20:
+        raise RuntimeError(f"Graph token invalid/empty. token_len={len(tok.strip()) if isinstance(tok,str) else 'NA'}")
+
+    r = requests.post(
+        url,
+        headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
+        data=json.dumps(payload),
+    )
+    r.raise_for_status()
+    return r.json() if r.text else {}
 
 def _graph_post(url: str, payload: Dict) -> Dict:
     tok = _graph_token()
