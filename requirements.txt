@@ -1,7 +1,8 @@
 streamlit
 sqlalchemy
 pandas
-msal
 requests
+beautifulsoup4
+lxml
 python-dateutil
 openai
