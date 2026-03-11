@@ -1,56 +1,59 @@
 import requests
 from bs4 import BeautifulSoup
 
-from web_sources import WEB_SOURCES
+from sqlalchemy import select
+
+from models import SessionLocal, Regulation, RegulationLink
 
 
-def fetch_index(url: str):
+def download_article(url):
+
     r = requests.get(url, timeout=30)
     r.raise_for_status()
-    return r.text
+
+    soup = BeautifulSoup(r.text, "lxml")
+
+    title = soup.title.text if soup.title else url
+
+    paragraphs = [p.get_text() for p in soup.select("p")]
+
+    text = " ".join(paragraphs)
+
+    return title, text
 
 
-def extract_dnv_links(html):
-    soup = BeautifulSoup(html, "lxml")
+def ingest_web_article(item):
 
-    links = []
+    with SessionLocal() as s:
 
-    for a in soup.select("a"):
-        href = a.get("href")
+        exists = s.execute(
+            select(Regulation).where(Regulation.title == item["url"])
+        ).first()
 
-        if not href:
-            continue
+        if exists:
+            return False
 
-        if "/maritime/technical-regulatory-news/" in href and href != "/maritime/technical-regulatory-news/":
+        title, text = download_article(item["url"])
 
-            if href.startswith("/"):
-                href = "https://www.dnv.com" + href
+        reg = Regulation(
+            title=title,
+            source=item["source"],
+            jurisdiction=item["jurisdiction"],
+            category="HSEQ",
+            summary=text[:1000],
+            status="Open"
+        )
 
-            links.append(href)
+        s.add(reg)
+        s.flush()
 
-    return list(set(links))
+        s.add(RegulationLink(
+            regulation_id=reg.id,
+            url=item["url"],
+            link_type="news",
+            title="Source article"
+        ))
 
+        s.commit()
 
-def discover_articles():
-
-    discovered = []
-
-    for source in WEB_SOURCES:
-
-        html = fetch_index(source["base_url"])
-
-        if "dnv.com" in source["base_url"]:
-            links = extract_dnv_links(html)
-
-        else:
-            links = []
-
-        for link in links:
-            discovered.append({
-                "source": source["name"],
-                "url": link,
-                "publisher": source["publisher"],
-                "jurisdiction": source["jurisdiction"]
-            })
-
-    return discovered
+    return True
