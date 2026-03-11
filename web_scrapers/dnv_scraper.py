@@ -1,29 +1,38 @@
 import requests
 from bs4 import BeautifulSoup
 
-r = requests.get(url, headers=HEADERS, timeout=30)
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
+}
+
 
 def discover_dnv_articles(url):
 
-    r = requests.get(url, timeout=30)
-    r.raise_for_status()
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30)
 
-    soup = BeautifulSoup(r.text, "lxml")
+        if r.status_code != 200:
+            return []
 
-    links = []
+        soup = BeautifulSoup(r.text, "lxml")
 
-    for a in soup.select("a"):
+        links = []
 
-        href = a.get("href")
+        for a in soup.select("a"):
 
-        if not href:
-            continue
+            href = a.get("href")
 
-        if "/maritime/technical-regulatory-news/" in href:
+            if not href:
+                continue
 
-            if href.startswith("/"):
-                href = "https://www.dnv.com" + href
+            if "/maritime/technical-regulatory-news/" in href:
 
-            links.append(href)
+                if href.startswith("/"):
+                    href = "https://www.dnv.com" + href
 
-    return list(set(links))
+                links.append(href)
+
+        return list(set(links))
+
+    except Exception:
+        return []
