@@ -1,10 +1,6 @@
 import requests
 from bs4 import BeautifulSoup
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
-
 r = requests.get(url, headers=HEADERS, timeout=30)
 
 def discover_dnv_articles(url):
