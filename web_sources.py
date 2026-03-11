@@ -3,7 +3,6 @@ Registry of maritime regulatory sources to monitor
 """
 
 WEB_SOURCES = [
-    WEB_SOURCES = [
     {
         "name": "Gard Shipping Changes 2026",
         "base_url": "https://gard.no/en/insights/what-is-changing-for-shipping-in-2026-1/",
