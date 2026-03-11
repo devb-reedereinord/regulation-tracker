@@ -2,24 +2,41 @@ import requests
 from bs4 import BeautifulSoup
 
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+}
+
+
 def discover_imo_news(url):
 
-    r = requests.get(url, timeout=30)
-    r.raise_for_status()
+    try:
 
-    soup = BeautifulSoup(r.text, "lxml")
+        r = requests.get(url, headers=HEADERS, timeout=30)
 
-    links = []
+        if r.status_code != 200:
+            return []
 
-    for a in soup.select("a"):
+        soup = BeautifulSoup(r.text, "lxml")
 
-        href = a.get("href")
+        links = []
 
-        if "/en/MediaCentre/Pages/" in str(href):
+        for a in soup.select("a"):
 
-            if href.startswith("/"):
-                href = "https://www.imo.org" + href
+            href = a.get("href")
 
-            links.append(href)
+            if not href:
+                continue
 
-    return list(set(links))
+            if "/en/MediaCentre/" in str(href):
+
+                if href.startswith("/"):
+                    href = "https://www.imo.org" + href
+
+                links.append(href)
+
+        return list(set(links))
+
+    except Exception:
+
+        # prevent crash of entire crawler
+        return []
