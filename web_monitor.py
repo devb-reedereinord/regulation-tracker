@@ -9,26 +9,27 @@ def discover_articles():
 
     for source in WEB_SOURCES:
 
-        if source["type"] == "dnv_index":
+        try:
 
-            links = discover_dnv_articles(source["base_url"])
+            if source["type"] == "dnv_index":
+                links = discover_dnv_articles(source["base_url"])
 
-        elif source["type"] == "imo_news":
+            elif source["type"] == "imo_news":
+                links = discover_imo_news(source["base_url"])
 
-            links = discover_imo_news(source["base_url"])
+            else:
+                links = []
 
-        else:
+            for link in links:
 
-            links = []
+                discovered.append({
+                    "url": link,
+                    "source": source["publisher"],
+                    "jurisdiction": source["jurisdiction"]
+                })
 
-        for link in links:
+        except Exception as e:
 
-            discovered.append({
-
-                "url": link,
-                "source": source["publisher"],
-                "jurisdiction": source["jurisdiction"]
-
-            })
+            print(f"Error scraping {source['name']}:", e)
 
     return discovered
