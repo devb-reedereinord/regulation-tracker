@@ -1,323 +1,196 @@
-"""
-app.py — Streamlit Regulation Tracker (modular)
-- Uses models.py for DB and helpers
-- Uses agent.py for email ingestion + notifications
-"""
-
-import pandas as pd
 import streamlit as st
-from datetime import date, datetime
-from typing import List, Optional
-
+import pandas as pd
 from sqlalchemy import select
-from sqlalchemy.orm import selectinload
 
-from config import (
-    DEPARTMENTS, REG_STATUS_OPTIONS,
-    GRAPH_MAILBOX, GRAPH_TARGET_SUBFOLDER, NOTIFY_MODE
+from models import SessionLocal, Regulation, RegulationLink
+
+# new website monitoring modules
+from web_monitor import discover_articles
+from web_ingest import ingest_web_article
+
+st.set_page_config(page_title="RegTracker", layout="wide")
+
+st.title("Maritime Regulation Tracker")
+
+st.caption(
+    "Automated monitoring of regulatory sources (DNV, IMO, EU etc.) "
+    "with AI-assisted extraction."
 )
-from models import (
-    SessionLocal, Regulation, RegulationLink, Action,
-    split_multi, join_multi, normalize_departments
-)
-from agent import ingest_once, copy_last_inbox_message_to_regulations
 
-# --- Streamlit page setup ---
-st.set_page_config(page_title="Regulation Tracker (Modular)", layout="wide")
-st.title("Regulation Tracker")
+# ----------------------------------------------------
+# DATABASE QUERY
+# ----------------------------------------------------
 
-# --- Editor password (optional) ---
-EDIT_PASSWORD = st.secrets.get("edit_password", "")  # or env var REGTRACKER_EDIT_PASSWORD
-def is_editor() -> bool:
-    return bool(st.session_state.get("is_editor", False))
-def require_editor_message():
-    st.info("🔒 Editing **Department** and **Assignees** requires the editor password (see sidebar).")
-
-# --- Sidebar filters ---
-with st.sidebar:
-    st.subheader("Filters")
-    q = st.text_input("Search (title/summary/jurisdiction)")
+def load_regulations():
 
     with SessionLocal() as s:
-        sources_raw = [r[0] for r in s.execute(select(Regulation.source).distinct()).all() if r[0]]
-        asg_raw = [r[0] for r in s.execute(select(Action.assignee).distinct()).all() if r[0]]
 
-    sources = sorted(set(sources_raw))
-    all_assignees = sorted({a for v in asg_raw for a in split_multi(v)})
+        regs = s.execute(
+            select(Regulation)
+        ).scalars().all()
 
-    source = st.selectbox("Source", options=["All"] + sources)
-    status = st.selectbox("Status", options=["All"] + REG_STATUS_OPTIONS)
-    department_filter = st.multiselect("Department", options=DEPARTMENTS, default=[])
-    assignee_filter = st.multiselect("Assignee", options=all_assignees, default=[])
+        data = []
 
-    st.divider()
-    st.subheader("Editor access")
+        for r in regs:
 
-    if not EDIT_PASSWORD:
-        st.warning("No editor password configured. Set `edit_password` in `.streamlit/secrets.toml`.")
-        st.session_state["is_editor"] = False
-    else:
-        pw = st.text_input("Editor password", type="password")
-        if st.button("Unlock editing"):
-            st.session_state["is_editor"] = (pw == EDIT_PASSWORD)
-        if is_editor():
-            st.success("Editing unlocked for Department & Assignees.")
-            if st.button("Lock editing"):
-                st.session_state["is_editor"] = False
+            data.append(
+                {
+                    "ID": r.id,
+                    "Title": r.title,
+                    "Source": r.source,
+                    "Jurisdiction": r.jurisdiction,
+                    "Category": r.category,
+                    "Status": r.status,
+                    "Summary": r.summary,
+                }
+            )
+
+        return pd.DataFrame(data)
+
+
+# ----------------------------------------------------
+# DASHBOARD
+# ----------------------------------------------------
+
+st.header("Regulation Dashboard")
+
+df = load_regulations()
+
+if len(df) == 0:
+    st.info("No regulations in database yet.")
+
+else:
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.metric("Total Regulations", len(df))
+
+    with col2:
+        st.metric("Open", len(df[df["Status"] == "Open"]))
+
+    with col3:
+        st.metric("Closed", len(df[df["Status"] == "Closed"]))
+
+    st.dataframe(df, use_container_width=True)
+
+
+# ----------------------------------------------------
+# WEBSITE MONITOR
+# ----------------------------------------------------
+
+st.divider()
+st.header("Regulatory Website Monitor")
+
+st.caption(
+    "Scans regulatory websites such as DNV technical regulatory news, "
+    "IMO updates and EU maritime announcements."
+)
+
+if st.button("Scan Regulatory Websites"):
+
+    with st.spinner("Scanning sources..."):
+
+        items = discover_articles()
+
+        new_items = 0
+
+        for item in items:
+
+            created = ingest_web_article(item)
+
+            if created:
+                new_items += 1
+
+    st.success(f"{new_items} new regulatory updates discovered.")
+
+
+# ----------------------------------------------------
+# REGULATION DETAIL VIEW
+# ----------------------------------------------------
+
+st.divider()
+st.header("Regulation Detail")
+
+selected_id = st.number_input("Enter regulation ID", min_value=1, step=1)
+
+if st.button("Load Regulation"):
+
+    with SessionLocal() as s:
+
+        reg = s.get(Regulation, selected_id)
+
+        if not reg:
+            st.error("Regulation not found")
+
         else:
-            st.caption("View-only for Department & Assignees unless unlocked.")
 
-# --- Fetch & filter records ---
-with SessionLocal() as s:
-    regs = s.execute(select(Regulation).options(selectinload(Regulation.actions))).scalars().all()
+            st.subheader(reg.title)
 
-filtered: List[Regulation] = []
-ql = (q or "").lower()
+            st.write("Source:", reg.source)
+            st.write("Jurisdiction:", reg.jurisdiction)
+            st.write("Category:", reg.category)
+            st.write("Status:", reg.status)
 
-for r in regs:
-    if ql:
-        if not (
-            (r.title or "").lower().find(ql) >= 0
-            or (r.summary or "").lower().find(ql) >= 0
-            or (r.jurisdiction or "").lower().find(ql) >= 0
-        ):
-            continue
+            st.markdown("### Summary")
+            st.write(reg.summary)
 
-    if source != "All" and r.source != source:
-        continue
-    if status != "All" and r.status != status:
-        continue
-
-    if department_filter:
-        r_depts = set(normalize_departments(split_multi(r.category)))
-        if not r_depts.intersection(set(department_filter)):
-            continue
-
-    if assignee_filter:
-        r_asg = set()
-        for a in (r.actions or []):
-            r_asg.update(split_multi(a.assignee))
-        if not r_asg.intersection(set(assignee_filter)):
-            continue
-
-    filtered.append(r)
-
-# --- UI helpers ---
-def departments_for_reg(r: Regulation) -> str:
-    depts = normalize_departments(split_multi(r.category))
-    return ", ".join(depts) if depts else "—"
-
-def assignees_for_reg(r: Regulation) -> str:
-    names: List[str] = []
-    for a in (r.actions or []):
-        names.extend(split_multi(a.assignee))
-    seen = set()
-    out: List[str] = []
-    for n in names:
-        k = n.lower()
-        if k not in seen:
-            seen.add(k)
-            out.append(n)
-    return ", ".join(out) if out else "—"
-
-left, right = st.columns([7, 5])
-
-# --- Left: regulations list ---
-with left:
-    st.subheader("Regulations")
-    df = pd.DataFrame([
-        {
-            "ID": r.id,
-            "Title": r.title,
-            "Source": r.source,
-            "Department": departments_for_reg(r),
-            "Assignee": assignees_for_reg(r),
-            "Effective": r.effective_date,
-            "Status": r.status,
-        }
-        for r in filtered
-    ])
-    st.dataframe(df, use_container_width=True, hide_index=True)
-
-    ids = [r.id for r in filtered]
-    titles = [f"#{r.id} — {r.title[:80]}" for r in filtered]
-    selected_label = st.selectbox("Select a regulation", options=["(none)"] + titles)
-    selected_id: Optional[int] = None
-    if selected_label != "(none)":
-        idx = titles.index(selected_label)
-        selected_id = ids[idx]
-
-# --- Right: details & actions + ingestion controls ---
-with right:
-    st.subheader("Details & Actions")
-    if not selected_id:
-        st.info("Select a regulation on the left to view and edit.")
-    else:
-        with SessionLocal() as s:
-            reg = s.get(Regulation, selected_id)
-            if not reg:
-                st.error("Not found.")
-            else:
-                _ = reg.actions  # eager load
-                _ = reg.links
-
-                st.markdown(f"### {reg.title}")
-                st.caption(f"{reg.source or '-'} · {reg.jurisdiction or '-'} · Effective {reg.effective_date or '-'}")
-                st.write(reg.summary or "")
-
-                current_status = reg.status if reg.status in REG_STATUS_OPTIONS else "N/A"
-                new_reg_status = st.selectbox(
-                    "Status",
-                    options=REG_STATUS_OPTIONS,
-                    index=REG_STATUS_OPTIONS.index(current_status),
-                    key="reg_status",
+            links = s.execute(
+                select(RegulationLink).where(
+                    RegulationLink.regulation_id == reg.id
                 )
+            ).scalars().all()
 
-                # Department editor: password-gated
-                current_depts = normalize_departments(split_multi(reg.category))
-                if is_editor():
-                    new_depts = st.multiselect(
-                        "Department(s)",
-                        options=DEPARTMENTS,
-                        default=current_depts,
-                        key="reg_depts",
-                    )
-                else:
-                    st.multiselect(
-                        "Department(s)",
-                        options=DEPARTMENTS,
-                        default=current_depts,
-                        disabled=True,
-                        key="reg_depts_disabled",
-                    )
-                    require_editor_message()
-                    new_depts = current_depts  # keep unchanged
+            if links:
 
-                if st.button("Save Regulation Updates"):
-                    reg.status = new_reg_status
-                    # only editors can change departments
-                    if is_editor():
-                        reg.category = join_multi(normalize_departments(new_depts))
-                    s.add(reg)
-                    s.commit()
-                    st.success("Regulation updated")
+                st.markdown("### Links")
 
-                st.markdown("#### Relevant Links")
-                if not reg.links:
-                    st.write("No links attached.")
-                else:
-                    for l in reg.links:
-                        st.markdown(f"- [{l.title or l.url}]({l.url})  ")
+                for link in links:
 
-                st.markdown("#### Actions")
-                if not reg.actions:
-                    st.write("No actions yet.")
-                else:
-                    for a in sorted(reg.actions, key=lambda x: (x.due_date or date.max)):
-                        with st.expander(f"{a.title} — {a.status}"):
-                            c1, c2, c3 = st.columns([2, 1, 1])
-                            with c1:
-                                new_title = st.text_input("Title", value=a.title, key=f"t_{a.id}")
-                                new_desc = st.text_area("Description", value=a.description or "", key=f"d_{a.id}")
-                            with c2:
-                                new_status = st.selectbox(
-                                    "Status",
-                                    ["Planned", "In Progress", "Done", "Blocked"],
-                                    index=["Planned", "In Progress", "Done", "Blocked"].index(a.status or "Planned"),
-                                    key=f"s_{a.id}",
-                                )
-                                # Assignee editor: password-gated
-                                if is_editor():
-                                    new_assignee = st.text_input(
-                                        "Assignee(s) (separate with ; , or |)",
-                                        value=a.assignee or "",
-                                        key=f"as_{a.id}",
-                                    )
-                                else:
-                                    st.text_input(
-                                        "Assignee(s) (separate with ; , or |)",
-                                        value=a.assignee or "",
-                                        disabled=True,
-                                        key=f"as_{a.id}_disabled",
-                                    )
-                                    require_editor_message()
-                                    new_assignee = a.assignee or ""
-                            with c3:
-                                new_due = st.date_input("Due date", value=a.due_date or date.today(), key=f"dd_{a.id}")
-                                done = st.checkbox("Mark done", value=(a.status == "Done"), key=f"ck_{a.id}")
+                    st.markdown(f"- [{link.title}]({link.url})")
 
-                            save = st.button("Save", key=f"save_{a.id}")
-                            delete = st.button("Delete", type="secondary", key=f"del_{a.id}")
 
-                            if save:
-                                a.title = new_title
-                                a.description = new_desc
-                                a.status = "Done" if done else new_status
-                                # only editors can change assignees
-                                if is_editor():
-                                    a.assignee = join_multi(split_multi(new_assignee))
-                                a.due_date = new_due
-                                a.completed_at = datetime.utcnow() if a.status == "Done" else None
-                                s.add(a)
-                                s.commit()
-                                st.success("Saved")
+# ----------------------------------------------------
+# MANUAL INGESTION
+# ----------------------------------------------------
 
-                            if delete:
-                                s.delete(a)
-                                s.commit()
-                                st.warning("Deleted")
+st.divider()
+st.header("Manual Regulation Entry")
 
-                st.divider()
-                st.markdown("#### Add Action")
-                with st.form("add_action"):
-                    atitle = st.text_input("Title", value="New action")
-                    adesc = st.text_area("Description", value="")
-                    if is_editor():
-                        aassignee = st.text_input("Assignee(s) (separate with ; , or |)", value="")
-                    else:
-                        aassignee = st.text_input("Assignee(s) (separate with ; , or |)", value="", disabled=True)
-                        st.caption("🔒 Assignees can only be set by an editor.")
-                    adue = st.date_input("Due date", value=date.today())
-                    submitted = st.form_submit_button("Add")
-                    if submitted:
-                        new_a = Action(
-                            regulation_id=reg.id,
-                            title=atitle,
-                            description=adesc,
-                            assignee=join_multi(split_multi(aassignee)) if is_editor() else "",
-                            due_date=adue,
-                        )
-                        s.add(new_a)
-                        s.commit()
-                        st.success("Action added")
+with st.form("manual_regulation_form"):
 
-    st.divider()
-    st.markdown("#### Email Ingestion (Inbox ▸ Regulations)")
-    st.caption(f"Mailbox: {GRAPH_MAILBOX} — Subfolder: {GRAPH_TARGET_SUBFOLDER} — Notifications: {NOTIFY_MODE}")
+    title = st.text_input("Title")
+    source = st.text_input("Source")
+    jurisdiction = st.text_input("Jurisdiction")
+    category = st.text_input("Category")
+    summary = st.text_area("Summary")
 
-    c1, c2, c3 = st.columns([1, 1, 1])
-    with c1:
-        if st.button("Sync mail (dry run)"):
-            try:
-                stats = ingest_once(limit=50, dry_run=True)
-                msg = f"Folder: {stats['folder']} — created {stats['created']}, skipped {stats['skipped']}."
-                if stats.get("note"): msg += f" Note: {stats['note']}."
-                st.info(msg)
-            except Exception as ex:
-                st.error(f"Dry run failed: {ex}")
-    with c2:
-        if st.button("Sync & notify"):
-            try:
-                stats = ingest_once(limit=50, dry_run=False)
-                st.success(f"Folder: {stats['folder']} — created {stats['created']}, skipped {stats['skipped']}.")
-            except Exception as ex:
-                st.error(f"Sync failed: {ex}")
-    with c3:
-        if st.button("Create test item (copy last Inbox message → Regulations)"):
-            try:
-                out = copy_last_inbox_message_to_regulations()
-                st.success(out)
-            except Exception as ex:
-                st.error(f"Test item failed: {ex}")
+    submit = st.form_submit_button("Create Regulation")
 
-st.caption("DB: {}".format(st.secrets.get("DATABASE_URL", "sqlite:///regtracker.db")))
+    if submit:
+
+        with SessionLocal() as s:
+
+            reg = Regulation(
+                title=title,
+                source=source,
+                jurisdiction=jurisdiction,
+                category=category,
+                summary=summary,
+                status="Open",
+            )
+
+            s.add(reg)
+            s.commit()
+
+        st.success("Regulation created successfully")
+
+
+# ----------------------------------------------------
+# REFRESH BUTTON
+# ----------------------------------------------------
+
+st.divider()
+
+if st.button("Refresh Dashboard"):
+    st.experimental_rerun()
