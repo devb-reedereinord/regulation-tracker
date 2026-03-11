@@ -8,24 +8,17 @@ from web_scrapers.gard_digest_scraper import discover_gard_digest_items
 
 
 def discover_articles() -> List[Dict]:
-    """
-    Returns a unified list of discovered records.
-
-    For digest pages (like Gard), each returned dict is already an item.
-    For index pages (like DNV), each returned dict is a link to an article page.
-    """
     discovered: List[Dict] = []
 
     for source in WEB_SOURCES:
         try:
-            source_type = source["type"]
-
-            if source_type == "gard_digest":
+            if source["type"] == "gard_digest":
                 items = discover_gard_digest_items(source["base_url"])
                 discovered.extend(items)
 
-            elif source_type == "dnv_index":
+            elif source["type"] == "dnv_index":
                 links = discover_dnv_articles(source["base_url"])
+
                 for link in links:
                     discovered.append(
                         {
