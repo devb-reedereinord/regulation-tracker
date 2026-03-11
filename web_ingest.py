@@ -5,21 +5,32 @@ from sqlalchemy import select
 
 from models import SessionLocal, Regulation, RegulationLink
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+}
+
 
 def download_article(url):
 
-    r = requests.get(url, timeout=30)
-    r.raise_for_status()
+    try:
 
-    soup = BeautifulSoup(r.text, "lxml")
+        r = requests.get(url, headers=HEADERS, timeout=30)
 
-    title = soup.title.text if soup.title else url
+        if r.status_code != 200:
+            return None, None
 
-    paragraphs = [p.get_text() for p in soup.select("p")]
+        soup = BeautifulSoup(r.text, "lxml")
 
-    text = " ".join(paragraphs)
+        title = soup.title.text if soup.title else url
 
-    return title, text
+        paragraphs = [p.get_text() for p in soup.select("p")]
+
+        text = " ".join(paragraphs)
+
+        return title, text
+
+    except Exception:
+        return None, None
 
 
 def ingest_web_article(item):
@@ -35,25 +46,5 @@ def ingest_web_article(item):
 
         title, text = download_article(item["url"])
 
-        reg = Regulation(
-            title=title,
-            source=item["source"],
-            jurisdiction=item["jurisdiction"],
-            category="HSEQ",
-            summary=text[:1000],
-            status="Open"
-        )
-
-        s.add(reg)
-        s.flush()
-
-        s.add(RegulationLink(
-            regulation_id=reg.id,
-            url=item["url"],
-            link_type="news",
-            title="Source article"
-        ))
-
-        s.commit()
-
-    return True
+        if not title:
+            return False
