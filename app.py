@@ -9,7 +9,7 @@ from web_monitor import discover_articles
 from web_ingest import ingest_web_article
 
 try:
-    from agent import ingest_shared_mailbox, start_device_flow, complete_device_flow, get_token_cache_string
+    from agent import ingest_shared_mailbox, start_device_flow, complete_device_flow, get_token_cache_string, resummary_with_ai
     from config import SHARED_MAILBOX, GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET
     _EMAIL_IMPORTS_OK = True
     _EMAIL_IMPORT_ERR = ""
@@ -343,6 +343,34 @@ with st.sidebar:
 
     st.divider()
     st.markdown("## Administration")
+
+    # Re-summarize All — fixes one-sentence summaries from old ingestion prompt
+    if st.button("✨ Re-summarize All", use_container_width=True, help="Regenerate rich structured summaries for all regulations that have thin (<200 char) summaries."):
+        if not _EMAIL_IMPORTS_OK:
+            st.error("OpenAI not available.")
+        else:
+            with SessionLocal() as _s:
+                _stale = [
+                    r for r in _s.execute(select(Regulation)).scalars().all()
+                    if len(r.summary or "") < 200
+                ]
+            if not _stale:
+                st.success("All summaries are already detailed.")
+            else:
+                _prog = st.progress(0, text=f"Re-summarizing {len(_stale)} regulation(s)…")
+                for _i, _r in enumerate(_stale):
+                    _prog.progress((_i + 1) / len(_stale), text=f"Re-summarizing {_i+1}/{len(_stale)}: {_r.title[:60]}…")
+                    _new_summary = resummary_with_ai(_r.title, _r.source or "")
+                    if _new_summary:
+                        with SessionLocal() as _s2:
+                            _reg2 = _s2.get(Regulation, _r.id)
+                            if _reg2:
+                                _reg2.summary = _new_summary
+                                _s2.commit()
+                _prog.empty()
+                st.success(f"✓ Re-summarized {len(_stale)} regulation(s).")
+                st.rerun()
+
     if st.button("🗑 Clear All Regulations", use_container_width=True):
         st.session_state["confirm_clear_db"] = True
 
@@ -446,9 +474,9 @@ def _render_detail_panel(reg_id: int):
             else:
                 st.markdown(f"📎 {lnk.title or lnk.url}")
 
-    # ── Status + delete actions ──
+    # ── Status + delete + re-summarize actions ──
     st.markdown("---")
-    act1, act2, act3, act4, _ = st.columns([1, 1, 1, 1, 2])
+    act1, act2, act3, act4, act5 = st.columns(5)
     with act1:
         if st.button("▶ In Progress", key="detail_inprog"):
             _update_status(reg_id, "In Progress")
@@ -462,6 +490,22 @@ def _render_detail_panel(reg_id: int):
             _update_status(reg_id, "Open")
             st.rerun()
     with act4:
+        if st.button("✨ Re-summarize", key="detail_resumm"):
+            with st.spinner("Generating rich summary…"):
+                try:
+                    new_s = resummary_with_ai(reg.title, reg.source or "")
+                    if new_s:
+                        with SessionLocal() as _s:
+                            _r = _s.get(Regulation, reg_id)
+                            if _r:
+                                _r.summary = new_s
+                                _s.commit()
+                        st.rerun()
+                    else:
+                        st.warning("OpenAI unavailable — check OPENAI_API_KEY.")
+                except Exception as _ex:
+                    st.error(f"Re-summarize failed: {_ex}")
+    with act5:
         if st.button("🗑 Delete", key="detail_delete"):
             st.session_state["confirm_delete_id"] = reg_id
 
