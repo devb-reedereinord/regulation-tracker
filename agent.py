@@ -33,6 +33,18 @@ from models import (
     normalize_departments, join_multi
 )
 
+# ── Company profile — used to assess regulatory applicability ────────────────
+COMPANY_PROFILE = """
+Company: Reederei Nord Group (ship management company, Netherlands)
+Fleet managed: Container Vessels, Bulk Carriers, Tankers (oil & chemical)
+Operates on behalf of the Oldendorff Family and third-party vessel owners.
+Vessels trade internationally on global routes.
+Relevant conventions: SOLAS, MARPOL (Annex I, II, IV, V, VI), MLC, STCW, ISM, ISPS, CLC, BWM.
+Key internal departments: Marine Ops, Technical, HSEQ, Crewing, Human Resources.
+"""
+
+FLEET_TYPES = ["Container Vessels", "Bulk Carriers", "Tankers"]
+
 GRAPH_SCOPE        = ["https://graph.microsoft.com/.default"]
 GRAPH_SCOPE_DELEGATED = ["https://graph.microsoft.com/Mail.Read", "offline_access"]
 GRAPH_BASE         = "https://graph.microsoft.com/v1.0"
@@ -335,48 +347,59 @@ def _extract_obligations_with_ai(subject: str, body_preview: str, body_html: str
             "Each item is a separate obligation entry."
         )
         prompt = f"""
+You are assessing maritime regulations for the following company:
+{COMPANY_PROFILE}
+
 The attached document is a maritime regulatory digest. Extract EVERY individual regulatory item
 as a separate obligation. For each item return:
 
 - title: regulation title with reference, e.g.
-  "MARPOL Annex VI Reg 14 – In-use fuel oil sampling points (MEPC.324(75))"
+  "MARPOL Annex VI Reg 14 \u2013 In-use fuel oil sampling points (MEPC.324(75))"
 
-- description: structured markdown summary using this EXACT layout —
+- description: structured markdown summary using this EXACT layout \u2014
 
     One sentence overview of what changed and why it matters.
 
     **Key requirements:**
-    - Specific obligation 1 (e.g. "Ships must install a designated in-use fuel oil sampling point")
+    - Specific obligation 1
     - Specific obligation 2
     - Specific obligation 3
     (Include up to 6 bullets covering every distinct obligation or compliance step)
 
     **Applies to:** Ship types, sizes (GT/DWT thresholds), new vs existing ships, flag states.
 
-    **Entry into force:** Date and any phase-in details (new ships vs existing ships if different).
+    **Entry into force:** Date and any phase-in details (new vs existing ships if different).
 
-  Use **bold** for the three section labels exactly as shown above.
+    **Reederei Nord relevance:** One sentence on how this specifically affects Reederei Nord's
+    Container Vessels, Bulk Carriers, and/or Tankers and what action is needed.
+
+  Use **bold** for all four section labels exactly as shown.
 
 - due_date: earliest entry into force date as YYYY-MM-DD, or null if not yet determined
 
-- department: internal departments affected — choose only from
+- department: internal departments affected \u2014 choose only from
   ["Marine Ops", "Technical", "HSEQ", "Crewing", "Human Resources"]
 
-Return ONLY valid JSON — no markdown fences, no commentary outside the JSON:
+- applicable_fleet: which of Reederei Nord's fleet types this applies to.
+  Choose any subset of: ["Container Vessels", "Bulk Carriers", "Tankers"]
+  Use [] only if the regulation genuinely does not apply to any of these types.
+
+Return ONLY valid JSON \u2014 no markdown fences, no text outside the JSON:
 {{
   "obligations": [
     {{
       "title": "...",
       "description": "...",
       "due_date": "YYYY-MM-DD or null",
-      "department": ["HSEQ", "Technical"]
+      "department": ["HSEQ", "Technical"],
+      "applicable_fleet": ["Tankers", "Bulk Carriers"]
     }}
   ]
 }}
 
 Rules:
-- Extract EVERY numbered regulation entry — do not skip any.
-- Do not fabricate items. Do not add commentary outside the JSON.
+- Extract EVERY numbered regulation entry \u2014 do not skip any.
+- Do not fabricate items. No commentary outside the JSON.
 
 Email subject: {subject}
 
@@ -388,21 +411,26 @@ Regulatory document text (may be truncated at {len(attachment_text)} chars):
         # ── Standard email mode ──────────────────────────────────────────────
         system_msg = "You extract maritime compliance obligations and deadlines from emails."
         prompt = f"""
-Extract concrete regulatory obligations or compliance tasks from this email.
-Return ONLY valid JSON in this schema — no markdown fences, no commentary:
+You are assessing maritime regulations for the following company:
+{COMPANY_PROFILE}
+
+Extract concrete regulatory obligations from this email.
+Return ONLY valid JSON \u2014 no markdown fences, no commentary:
 {{
   "obligations": [
     {{
       "title": "short obligation title",
-      "description": "structured markdown: one overview sentence, then **Key requirements:** bullets, **Applies to:**, **Entry into force:**",
+      "description": "markdown: overview sentence, **Key requirements:** bullets, **Applies to:**, **Entry into force:**, **Reederei Nord relevance:**",
       "due_date": "YYYY-MM-DD or null",
-      "department": ["Marine Ops", "Technical", "HSEQ", "Crewing", "Human Resources"]
+      "department": ["Marine Ops", "Technical", "HSEQ", "Crewing", "Human Resources"],
+      "applicable_fleet": ["Container Vessels", "Bulk Carriers", "Tankers"]
     }}
   ]
 }}
 
 Rules:
-- Only capture concrete compliance tasks with clear deadlines.
+- Only capture concrete compliance tasks.
+- applicable_fleet: subset of ["Container Vessels", "Bulk Carriers", "Tankers"] that this applies to.
 - Return an empty list if there are no obligations.
 
 Email subject: {subject}
@@ -434,6 +462,8 @@ Attachment text: {(attachment_text or "")[:4000]}
         desc = (item.get("description") or "").strip()
         due = item.get("due_date")
         departments = normalize_departments(item.get("department") or [])
+        raw_fleet = item.get("applicable_fleet") or []
+        applicable_fleet = [f for f in raw_fleet if f in FLEET_TYPES]
 
         due_date = None
         if due:
@@ -448,6 +478,7 @@ Attachment text: {(attachment_text or "")[:4000]}
                 "description": desc,
                 "due_date": due_date,
                 "departments": departments,
+                "applicable_fleet": applicable_fleet,
             })
     return out
 
@@ -717,10 +748,12 @@ def ingest_once(limit: int = 50, dry_run: bool = False) -> dict:
                 subject=subj,
             ))
 
-            # Department classification (AI + fallback keyword rules)
+            # Department + fleet classification (AI + fallback keyword rules)
             depts: List[str] = []
+            fleet_tags_parts: List[str] = []
             for ob in ai_obligations:
                 depts.extend(ob.get("departments", []))
+                fleet_tags_parts.extend(ob.get("applicable_fleet", []))
             if any(k in kw for k in ["MARPOL", "EIAPP", "NOX", "TIER III"]):
                 depts.extend(["HSEQ", "Technical"])
             if "USCG" in kw:
@@ -728,6 +761,7 @@ def ingest_once(limit: int = 50, dry_run: bool = False) -> dict:
             if "MRV" in kw:
                 depts.append("HSEQ")
             reg.category = join_multi(normalize_departments(depts))
+            reg.fleet_tags = join_multi([f for f in fleet_tags_parts if f in FLEET_TYPES])
 
             for ob in ai_obligations:
                 s.add(Action(
@@ -890,8 +924,10 @@ def ingest_shared_mailbox(mailbox: str = None, limit: int = 100, dry_run: bool =
             ))
 
             depts: List[str] = []
+            fleet_tags_parts: List[str] = []
             for ob in ai_obligations:
                 depts.extend(ob.get("departments", []))
+                fleet_tags_parts.extend(ob.get("applicable_fleet", []))
             if any(k in kw for k in ["MARPOL", "EIAPP", "NOX", "TIER III"]):
                 depts.extend(["HSEQ", "Technical"])
             if "USCG" in kw:
@@ -899,6 +935,7 @@ def ingest_shared_mailbox(mailbox: str = None, limit: int = 100, dry_run: bool =
             if "MRV" in kw:
                 depts.append("HSEQ")
             reg.category = join_multi(normalize_departments(depts))
+            reg.fleet_tags = join_multi([f for f in fleet_tags_parts if f in FLEET_TYPES])
 
             for ob in ai_obligations:
                 s.add(Action(
