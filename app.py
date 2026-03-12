@@ -351,23 +351,119 @@ c4.metric("Closed", closed)
 
 st.divider()
 
+# ── helpers ───────────────────────────────────────────────────────────────────
+def _update_status(reg_id: int, new_status: str):
+    with SessionLocal() as s:
+        reg = s.get(Regulation, reg_id)
+        if reg:
+            reg.status = new_status
+            s.commit()
+
+
+def _render_detail_panel(reg_id: int):
+    """Full-width detail panel rendered above the list when a regulation is selected."""
+    with SessionLocal() as s:
+        reg = s.get(Regulation, reg_id)
+        if not reg:
+            st.session_state.pop("selected_reg_id", None)
+            return
+        links = s.execute(
+            select(RegulationLink).where(RegulationLink.regulation_id == reg.id)
+        ).scalars().all()
+
+    # ── Header row ──
+    hcol_back, hcol_title = st.columns([1, 8])
+    with hcol_back:
+        if st.button("← Back", key="detail_back"):
+            st.session_state.pop("selected_reg_id", None)
+            st.rerun()
+    with hcol_title:
+        st.markdown(
+            f"{_source_tag(reg.source or '')} "
+            f"<span style='font-size:1.05rem;font-weight:700;color:#f1f5f9'>{reg.title}</span>",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(
+        f"""
+<div style="background:#161b27;border:1px solid #334155;border-radius:14px;padding:1.4rem 1.6rem;margin:0.5rem 0 1rem;">
+  <div style="display:flex;gap:1.2rem;align-items:center;flex-wrap:wrap;margin-bottom:1rem;">
+    {_status_badge(reg.status)}
+    <span style="color:#94a3b8;font-size:0.82rem">📅 <strong style="color:#e2e8f0">{str(reg.effective_date) if reg.effective_date else '—'}</strong></span>
+    <span style="color:#94a3b8;font-size:0.82rem">🌍 <strong style="color:#e2e8f0">{reg.jurisdiction or '—'}</strong></span>
+    <span style="color:#94a3b8;font-size:0.82rem">🏢 <strong style="color:#e2e8f0">{reg.category or '—'}</strong></span>
+  </div>
+</div>""",
+        unsafe_allow_html=True,
+    )
+
+    # ── Body: summary rendered as markdown ──
+    st.markdown(reg.summary or "_No summary available._")
+
+    # ── Links ──
+    if links:
+        st.markdown("---")
+        for lnk in links:
+            icon = "📄" if lnk.link_type == "pdf" else "🔗"
+            if str(lnk.url or "").startswith("http"):
+                st.markdown(f"{icon} [{lnk.title or lnk.url}]({lnk.url})")
+            else:
+                st.markdown(f"📎 {lnk.title or lnk.url}")
+
+    # ── Status actions ──
+    st.markdown("---")
+    act1, act2, act3, _ = st.columns([1, 1, 1, 4])
+    with act1:
+        if st.button("▶ Mark In Progress", key="detail_inprog"):
+            _update_status(reg_id, "In Progress")
+            st.rerun()
+    with act2:
+        if st.button("✓ Mark Closed", key="detail_closed"):
+            _update_status(reg_id, "Closed")
+            st.rerun()
+    with act3:
+        if st.button("↩ Reopen", key="detail_reopen"):
+            _update_status(reg_id, "Open")
+            st.rerun()
+
+    st.divider()
+
+
 # ── Regulation list ───────────────────────────────────────────────────────────
 st.markdown("## Regulations")
+
+# Show detail panel if a regulation is selected
+if "selected_reg_id" in st.session_state:
+    _render_detail_panel(st.session_state["selected_reg_id"])
 
 filtered = load_regulations(status_filter, source_filter, search_term)
 
 if not filtered:
     st.info("No regulations match the current filters.")
 else:
-    # Toggle between card view and table view
     view = st.radio("View", ["Table", "Cards"], horizontal=True, label_visibility="collapsed")
 
     if view == "Table":
         df = pd.DataFrame(filtered)
-        st.dataframe(df, use_container_width=True, hide_index=True, height=420)
+        # Drop Summary from table (shown in detail panel) to keep it clean
+        display_cols = ["ID", "Title", "Source", "Jurisdiction", "Department", "Effective", "Status"]
+        event = st.dataframe(
+            df[display_cols],
+            use_container_width=True,
+            hide_index=True,
+            height=420,
+            on_select="rerun",
+            selection_mode="single-row",
+        )
+        if event.selection.rows:
+            st.session_state["selected_reg_id"] = filtered[event.selection.rows[0]]["ID"]
+            st.rerun()
+
     else:
         for row in filtered[:50]:
-            st.markdown(f"""
+            card_col, btn_col = st.columns([10, 1])
+            with card_col:
+                st.markdown(f"""
 <div class="reg-card">
   <div class="reg-card-title">{_source_tag(row['Source'])}{row['Title']}</div>
   <div class="reg-card-meta">
@@ -376,51 +472,15 @@ else:
     <span>🌍 {row['Jurisdiction']}</span> &nbsp;·&nbsp;
     <span>🏢 {row['Department']}</span>
   </div>
-  <div style="color:#e2e8f0;font-size:0.8rem;margin-top:0.4rem;">{row['Summary']}</div>
+  <div style="color:#e2e8f0;font-size:0.8rem;margin-top:0.4rem;">{row['Summary'][:180]}{'…' if len(row['Summary']) > 180 else ''}</div>
 </div>""", unsafe_allow_html=True)
+            with btn_col:
+                if st.button("View →", key=f"open_{row['ID']}"):
+                    st.session_state["selected_reg_id"] = row["ID"]
+                    st.rerun()
+
         if len(filtered) > 50:
             st.caption(f"Showing 50 of {len(filtered)}. Use filters to narrow down.")
-
-st.divider()
-
-# ── Regulation detail ─────────────────────────────────────────────────────────
-st.markdown("## Regulation Detail")
-
-selected_id = st.number_input("Regulation ID", min_value=1, step=1, label_visibility="collapsed",
-                               placeholder="Enter regulation ID…")
-
-if st.button("Load Regulation"):
-    with SessionLocal() as s:
-        reg = s.get(Regulation, int(selected_id))
-        if not reg:
-            st.error("Regulation not found.")
-        else:
-            col_l, col_r = st.columns([2, 1])
-            with col_l:
-                st.markdown(f"### {reg.title}")
-                st.markdown(reg.summary or "_No summary._")
-            with col_r:
-                st.markdown(f"""
-<div style="background:#161b27;border:1px solid #1e2535;border-radius:10px;padding:1rem;">
-<div style="font-size:0.75rem;color:#cbd5e1;margin-bottom:0.5rem;letter-spacing:0.08em;">DETAILS</div>
-<div style="margin:4px 0;color:#ffffff"><span style="color:#94a3b8">Source</span> &nbsp; <strong style="color:#38bdf8">{reg.source or '—'}</strong></div>
-<div style="margin:4px 0;color:#ffffff"><span style="color:#94a3b8">Jurisdiction</span> &nbsp; {reg.jurisdiction or '—'}</div>
-<div style="margin:4px 0;color:#ffffff"><span style="color:#94a3b8">Department</span> &nbsp; {reg.category or '—'}</div>
-<div style="margin:4px 0;color:#ffffff"><span style="color:#94a3b8">Effective</span> &nbsp; {str(reg.effective_date) if reg.effective_date else '—'}</div>
-<div style="margin:8px 0 0">{_status_badge(reg.status)}</div>
-</div>""", unsafe_allow_html=True)
-
-            links = s.execute(
-                select(RegulationLink).where(RegulationLink.regulation_id == reg.id)
-            ).scalars().all()
-            if links:
-                st.markdown("**Links**")
-                for lnk in links:
-                    icon = "📄" if lnk.link_type == "pdf" else "🔗"
-                    if str(lnk.url or "").startswith("http"):
-                        st.markdown(f"{icon} [{lnk.title or lnk.url}]({lnk.url})")
-                    else:
-                        st.markdown(f"📎 {lnk.title or lnk.url}")
 
 st.divider()
 
