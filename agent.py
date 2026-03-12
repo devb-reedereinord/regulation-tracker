@@ -46,7 +46,7 @@ Key internal departments: Marine Ops, Technical, HSEQ, Crewing, Human Resources.
 FLEET_TYPES = ["Container Vessels", "Bulk Carriers", "Tankers"]
 
 GRAPH_SCOPE        = ["https://graph.microsoft.com/.default"]
-GRAPH_SCOPE_DELEGATED = ["https://graph.microsoft.com/Mail.Read", "offline_access"]
+GRAPH_SCOPE_DELEGATED = ["https://graph.microsoft.com/Mail.Read"]
 GRAPH_BASE         = "https://graph.microsoft.com/v1.0"
 _URL_RE            = re.compile(r'(https?://[^\s)>\]]+)', flags=re.I)
 
