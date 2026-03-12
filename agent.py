@@ -48,10 +48,21 @@ _TOKEN_CACHE_PATH = os.path.join(os.path.dirname(__file__), ".token_cache.json")
 # ---------------------------------------------------------------------------
 
 def _load_token_cache() -> msal.SerializableTokenCache:
+    """
+    Load the MSAL token cache.  Priority:
+    1. Local file  (.token_cache.json) — used when running locally
+    2. GRAPH_TOKEN_CACHE env var        — set via Streamlit secrets for cloud deployments
+       where the file system is wiped on every restart.
+    """
     cache = msal.SerializableTokenCache()
     if os.path.exists(_TOKEN_CACHE_PATH):
         with open(_TOKEN_CACHE_PATH, "r") as f:
             cache.deserialize(f.read())
+    else:
+        # Fallback: Streamlit secrets / environment variable
+        env_val = os.environ.get("GRAPH_TOKEN_CACHE", "").strip()
+        if env_val:
+            cache.deserialize(env_val)
     return cache
 
 
@@ -59,6 +70,18 @@ def _save_token_cache(cache: msal.SerializableTokenCache):
     if cache.has_state_changed:
         with open(_TOKEN_CACHE_PATH, "w") as f:
             f.write(cache.serialize())
+
+
+def get_token_cache_string() -> str:
+    """
+    Return the current serialized token cache as a string.
+    Used by the UI to show the value the user should paste into Streamlit secrets
+    as GRAPH_TOKEN_CACHE so it survives app restarts.
+    """
+    if os.path.exists(_TOKEN_CACHE_PATH):
+        with open(_TOKEN_CACHE_PATH, "r") as f:
+            return f.read().strip()
+    return os.environ.get("GRAPH_TOKEN_CACHE", "").strip()
 
 
 def start_device_flow() -> dict:
