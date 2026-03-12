@@ -38,16 +38,22 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 #MainMenu, footer { visibility: hidden; }
 header[data-testid="stHeader"] { background: transparent; }
 
+/* ── Global white text ── */
+.stApp, .stApp * {
+    color: #ffffff !important;
+}
+
 /* Page background */
-.stApp { background: #0f1117; color: #e2e8f0; }
+.stApp { background: #0f1117; }
 
 /* Sidebar */
 [data-testid="stSidebar"] {
     background: #161b27;
     border-right: 1px solid #1e2535;
 }
+[data-testid="stSidebar"] * { color: #ffffff !important; }
 [data-testid="stSidebar"] .stMarkdown h2 {
-    color: #60a5fa;
+    color: #60a5fa !important;
     font-size: 0.75rem;
     letter-spacing: 0.1em;
     text-transform: uppercase;
@@ -62,13 +68,29 @@ header[data-testid="stHeader"] { background: transparent; }
     border-radius: 12px;
     padding: 1rem 1.5rem;
 }
-[data-testid="metric-container"] label { color: #94a3b8 !important; font-size: 0.75rem; letter-spacing: 0.05em; text-transform: uppercase; }
-[data-testid="metric-container"] [data-testid="stMetricValue"] { color: #f1f5f9; font-size: 2rem; font-weight: 700; }
+[data-testid="metric-container"] label { color: #cbd5e1 !important; font-size: 0.75rem; letter-spacing: 0.05em; text-transform: uppercase; }
+[data-testid="metric-container"] [data-testid="stMetricValue"] { color: #ffffff !important; font-size: 2rem; font-weight: 700; }
 
 /* Section headers */
-h1 { color: #f1f5f9 !important; font-size: 1.6rem !important; font-weight: 700 !important; }
-h2 { color: #cbd5e1 !important; font-size: 1.15rem !important; font-weight: 600 !important; border-bottom: 1px solid #1e2535; padding-bottom: 0.4rem; }
-h3 { color: #94a3b8 !important; font-size: 0.9rem !important; font-weight: 600 !important; }
+h1 { color: #ffffff !important; font-size: 1.6rem !important; font-weight: 700 !important; }
+h2 { color: #ffffff !important; font-size: 1.15rem !important; font-weight: 600 !important; border-bottom: 1px solid #1e2535; padding-bottom: 0.4rem; }
+h3 { color: #e2e8f0 !important; font-size: 0.9rem !important; font-weight: 600 !important; }
+
+/* Paragraphs, captions, labels */
+p, span, div, label { color: #ffffff !important; }
+[data-testid="stCaption"], [data-testid="stCaption"] * { color: #cbd5e1 !important; }
+
+/* Selectbox, text input labels + values */
+.stSelectbox label, .stTextInput label, .stTextArea label,
+.stNumberInput label, .stDateInput label, .stMultiSelect label { color: #ffffff !important; }
+.stSelectbox [data-baseweb="select"] * { color: #ffffff !important; }
+.stMultiSelect [data-baseweb="tag"] * { color: #ffffff !important; }
+
+/* Radio buttons */
+.stRadio label, .stRadio div { color: #ffffff !important; }
+
+/* Expander title */
+[data-testid="stExpander"] summary, [data-testid="stExpander"] summary * { color: #ffffff !important; }
 
 /* Buttons */
 .stButton > button {
@@ -128,13 +150,14 @@ hr { border-color: #1e2535 !important; margin: 1.5rem 0; }
     transition: border-color 0.15s;
 }
 .reg-card:hover { border-color: #334155; }
-.reg-card-title { font-weight: 600; color: #e2e8f0; font-size: 0.9rem; margin-bottom: 0.3rem; }
-.reg-card-meta  { font-size: 0.75rem; color: #64748b; }
-.reg-card-source { color: #38bdf8; font-weight: 500; }
+.reg-card-title { font-weight: 600; color: #ffffff !important; font-size: 0.9rem; margin-bottom: 0.3rem; }
+.reg-card-meta  { font-size: 0.75rem; color: #cbd5e1 !important; }
+.reg-card-source { color: #38bdf8 !important; font-weight: 500; }
+.reg-card *     { color: #ffffff !important; }
 .source-tag {
     display: inline-block;
     background: #0f2744;
-    color: #38bdf8;
+    color: #38bdf8 !important;
     border: 1px solid #1e4d7b;
     border-radius: 6px;
     padding: 1px 8px;
@@ -249,7 +272,7 @@ else:
     <span>🌍 {row['Jurisdiction']}</span> &nbsp;·&nbsp;
     <span>🏢 {row['Department']}</span>
   </div>
-  <div style="color:#94a3b8;font-size:0.8rem;margin-top:0.4rem;">{row['Summary']}</div>
+  <div style="color:#e2e8f0;font-size:0.8rem;margin-top:0.4rem;">{row['Summary']}</div>
 </div>""", unsafe_allow_html=True)
         if len(filtered) > 50:
             st.caption(f"Showing 50 of {len(filtered)}. Use filters to narrow down.")
@@ -275,11 +298,11 @@ if st.button("Load Regulation"):
             with col_r:
                 st.markdown(f"""
 <div style="background:#161b27;border:1px solid #1e2535;border-radius:10px;padding:1rem;">
-<div style="font-size:0.75rem;color:#64748b;margin-bottom:0.5rem;">DETAILS</div>
-<div style="margin:4px 0"><span style="color:#64748b">Source</span> &nbsp; <strong style="color:#38bdf8">{reg.source or '—'}</strong></div>
-<div style="margin:4px 0"><span style="color:#64748b">Jurisdiction</span> &nbsp; {reg.jurisdiction or '—'}</div>
-<div style="margin:4px 0"><span style="color:#64748b">Department</span> &nbsp; {reg.category or '—'}</div>
-<div style="margin:4px 0"><span style="color:#64748b">Effective</span> &nbsp; {str(reg.effective_date) if reg.effective_date else '—'}</div>
+<div style="font-size:0.75rem;color:#cbd5e1;margin-bottom:0.5rem;letter-spacing:0.08em;">DETAILS</div>
+<div style="margin:4px 0;color:#ffffff"><span style="color:#94a3b8">Source</span> &nbsp; <strong style="color:#38bdf8">{reg.source or '—'}</strong></div>
+<div style="margin:4px 0;color:#ffffff"><span style="color:#94a3b8">Jurisdiction</span> &nbsp; {reg.jurisdiction or '—'}</div>
+<div style="margin:4px 0;color:#ffffff"><span style="color:#94a3b8">Department</span> &nbsp; {reg.category or '—'}</div>
+<div style="margin:4px 0;color:#ffffff"><span style="color:#94a3b8">Effective</span> &nbsp; {str(reg.effective_date) if reg.effective_date else '—'}</div>
 <div style="margin:8px 0 0">{_status_badge(reg.status)}</div>
 </div>""", unsafe_allow_html=True)
 
@@ -457,3 +480,5 @@ with st.form("manual_reg", clear_on_submit=True):
                 s.commit()
             st.success("Regulation created.")
             st.rerun()
+
+
