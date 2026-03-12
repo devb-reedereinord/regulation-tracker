@@ -264,6 +264,7 @@ def _ingest_pdf_regulations(pages: list[str], source_label: str, filename: str) 
                 summary=ob.get("description") or None,
                 effective_date=ob.get("due_date") or None,
                 category=join_multi(ob.get("departments") or []),
+                fleet_tags=join_multi(ob.get("applicable_fleet") or []),
                 jurisdiction="Global",
                 status="Open",
             )
@@ -283,7 +284,10 @@ def _ingest_pdf_regulations(pages: list[str], source_label: str, filename: str) 
     return {"created": created, "skipped": skipped, "chunks": len(chunks), "items": titles}
 
 
-def load_regulations(status_filter=None, source_filter=None, search=None):
+FLEET_TYPES = ["Container Vessels", "Bulk Carriers", "Tankers"]
+
+
+def load_regulations(status_filter=None, source_filter=None, search=None, fleet_filter=None):
     with SessionLocal() as s:
         regs = s.execute(select(Regulation).order_by(Regulation.received_at.desc())).scalars().all()
         rows = []
@@ -294,6 +298,10 @@ def load_regulations(status_filter=None, source_filter=None, search=None):
                 continue
             if search and search.lower() not in (r.title or "").lower() and search.lower() not in (r.summary or "").lower():
                 continue
+            if fleet_filter and fleet_filter != "All":
+                tags = r.fleet_tags or ""
+                if fleet_filter.lower() not in tags.lower():
+                    continue
             rows.append({
                 "ID": r.id,
                 "Title": r.title,
@@ -302,6 +310,7 @@ def load_regulations(status_filter=None, source_filter=None, search=None):
                 "Department": r.category or "—",
                 "Effective": str(r.effective_date) if r.effective_date else "—",
                 "Status": r.status or "N/A",
+                "Fleet": r.fleet_tags or "—",
                 "Summary": (r.summary or "")[:120] + "…" if len(r.summary or "") > 120 else (r.summary or ""),
             })
         return rows
@@ -318,6 +327,7 @@ with st.sidebar:
     with SessionLocal() as _s:
         _all_sources = [r for r in _s.execute(select(Regulation.source).distinct()).scalars().all() if r]
     source_filter = st.selectbox("Source", ["All"] + sorted(set(_all_sources)))
+    fleet_filter = st.selectbox("Fleet type", ["All"] + FLEET_TYPES)
     search_term = st.text_input("Search title / summary", placeholder="e.g. MARPOL, EEXI…")
 
     st.divider()
@@ -330,6 +340,32 @@ with st.sidebar:
     st.divider()
     if st.button("Refresh", use_container_width=True):
         st.rerun()
+
+    st.divider()
+    st.markdown("## Administration")
+    if st.button("🗑 Clear All Regulations", use_container_width=True):
+        st.session_state["confirm_clear_db"] = True
+
+    if st.session_state.get("confirm_clear_db"):
+        st.warning("⚠️ This will permanently delete ALL regulations, links and email records.")
+        col_yes, col_no = st.columns(2)
+        with col_yes:
+            if st.button("Yes, delete all", type="primary", use_container_width=True):
+                with SessionLocal() as _s:
+                    from sqlalchemy import text as _sql
+                    _s.execute(_sql("DELETE FROM regulation_links"))
+                    _s.execute(_sql("DELETE FROM actions"))
+                    _s.execute(_sql("DELETE FROM email_ingest"))
+                    _s.execute(_sql("DELETE FROM regulations"))
+                    _s.commit()
+                st.session_state.pop("confirm_clear_db", None)
+                st.session_state.pop("selected_reg_id", None)
+                st.success("Database cleared.")
+                st.rerun()
+        with col_no:
+            if st.button("Cancel", use_container_width=True):
+                st.session_state.pop("confirm_clear_db", None)
+                st.rerun()
 
 
 # ── Header ────────────────────────────────────────────────────────────────────
@@ -410,21 +446,42 @@ def _render_detail_panel(reg_id: int):
             else:
                 st.markdown(f"📎 {lnk.title or lnk.url}")
 
-    # ── Status actions ──
+    # ── Status + delete actions ──
     st.markdown("---")
-    act1, act2, act3, _ = st.columns([1, 1, 1, 4])
+    act1, act2, act3, act4, _ = st.columns([1, 1, 1, 1, 2])
     with act1:
-        if st.button("▶ Mark In Progress", key="detail_inprog"):
+        if st.button("▶ In Progress", key="detail_inprog"):
             _update_status(reg_id, "In Progress")
             st.rerun()
     with act2:
-        if st.button("✓ Mark Closed", key="detail_closed"):
+        if st.button("✓ Close", key="detail_closed"):
             _update_status(reg_id, "Closed")
             st.rerun()
     with act3:
         if st.button("↩ Reopen", key="detail_reopen"):
             _update_status(reg_id, "Open")
             st.rerun()
+    with act4:
+        if st.button("🗑 Delete", key="detail_delete"):
+            st.session_state["confirm_delete_id"] = reg_id
+
+    if st.session_state.get("confirm_delete_id") == reg_id:
+        st.error("Permanently delete this regulation?")
+        dc1, dc2 = st.columns(2)
+        with dc1:
+            if st.button("Yes, delete", key="confirm_del_yes", type="primary"):
+                with SessionLocal() as _s:
+                    _reg = _s.get(Regulation, reg_id)
+                    if _reg:
+                        _s.delete(_reg)
+                        _s.commit()
+                st.session_state.pop("confirm_delete_id", None)
+                st.session_state.pop("selected_reg_id", None)
+                st.rerun()
+        with dc2:
+            if st.button("Cancel", key="confirm_del_no"):
+                st.session_state.pop("confirm_delete_id", None)
+                st.rerun()
 
     st.divider()
 
@@ -436,17 +493,20 @@ st.markdown("## Regulations")
 if "selected_reg_id" in st.session_state:
     _render_detail_panel(st.session_state["selected_reg_id"])
 
-filtered = load_regulations(status_filter, source_filter, search_term)
+filtered = load_regulations(status_filter, source_filter, search_term, fleet_filter)
 
 if not filtered:
     st.info("No regulations match the current filters.")
 else:
-    view = st.radio("View", ["Table", "Cards"], horizontal=True, label_visibility="collapsed")
+    view_col, count_col = st.columns([3, 7])
+    with view_col:
+        view = st.radio("View", ["Table", "Cards"], horizontal=True, label_visibility="collapsed")
+    with count_col:
+        st.caption(f"{len(filtered)} regulation(s) shown")
 
     if view == "Table":
         df = pd.DataFrame(filtered)
-        # Drop Summary from table (shown in detail panel) to keep it clean
-        display_cols = ["ID", "Title", "Source", "Jurisdiction", "Department", "Effective", "Status"]
+        display_cols = ["ID", "Title", "Source", "Fleet", "Department", "Effective", "Status"]
         event = st.dataframe(
             df[display_cols],
             use_container_width=True,
@@ -460,27 +520,33 @@ else:
             st.rerun()
 
     else:
-        for row in filtered[:50]:
-            card_col, btn_col = st.columns([10, 1])
-            with card_col:
-                st.markdown(f"""
+        # Scrollable card container — fixed height, no page growth
+        with st.container(height=620, border=False):
+            for row in filtered:
+                card_col, btn_col = st.columns([10, 1])
+                with card_col:
+                    # Fleet tags as small pills
+                    fleet_pills = ""
+                    if row["Fleet"] and row["Fleet"] != "—":
+                        for ft in row["Fleet"].split(";"):
+                            ft = ft.strip()
+                            if ft:
+                                fleet_pills += f'<span style="display:inline-block;background:#0f2d1e;color:#34d399;border:1px solid #065f46;border-radius:5px;padding:1px 7px;font-size:0.68rem;font-weight:600;margin-right:4px">{ft}</span>'
+                    st.markdown(f"""
 <div class="reg-card">
   <div class="reg-card-title">{_source_tag(row['Source'])}{row['Title']}</div>
-  <div class="reg-card-meta">
+  <div class="reg-card-meta" style="margin:4px 0">
     {_status_badge(row['Status'])} &nbsp;
     <span>📅 {row['Effective']}</span> &nbsp;·&nbsp;
-    <span>🌍 {row['Jurisdiction']}</span> &nbsp;·&nbsp;
     <span>🏢 {row['Department']}</span>
   </div>
-  <div style="color:#e2e8f0;font-size:0.8rem;margin-top:0.4rem;">{row['Summary'][:180]}{'…' if len(row['Summary']) > 180 else ''}</div>
+  <div style="margin:4px 0">{fleet_pills}</div>
+  <div style="color:#94a3b8;font-size:0.78rem;margin-top:0.3rem">{row['Summary'][:180]}{'…' if len(row['Summary']) > 180 else ''}</div>
 </div>""", unsafe_allow_html=True)
-            with btn_col:
-                if st.button("View →", key=f"open_{row['ID']}"):
-                    st.session_state["selected_reg_id"] = row["ID"]
-                    st.rerun()
-
-        if len(filtered) > 50:
-            st.caption(f"Showing 50 of {len(filtered)}. Use filters to narrow down.")
+                with btn_col:
+                    if st.button("View", key=f"open_{row['ID']}"):
+                        st.session_state["selected_reg_id"] = row["ID"]
+                        st.rerun()
 
 st.divider()
 
@@ -594,6 +660,7 @@ if uploaded_pdf is not None:
                         summary=ob.get("description") or None,
                         effective_date=ob.get("due_date") or None,
                         category=join_multi(ob.get("departments") or []),
+                        fleet_tags=join_multi(ob.get("applicable_fleet") or []),
                         jurisdiction="Global",
                         status="Open",
                     )
