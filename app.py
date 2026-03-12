@@ -9,7 +9,7 @@ from web_monitor import discover_articles
 from web_ingest import ingest_web_article
 
 try:
-    from agent import ingest_shared_mailbox, start_device_flow, complete_device_flow
+    from agent import ingest_shared_mailbox, start_device_flow, complete_device_flow, get_token_cache_string
     from config import SHARED_MAILBOX, GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET
     _EMAIL_IMPORTS_OK = True
     _EMAIL_IMPORT_ERR = ""
@@ -642,16 +642,32 @@ The app only needs **`Mail.Read` delegated permission** — no admin consent req
     if "device_flow" in st.session_state:
         flow = st.session_state["device_flow"]
         st.info(
-            f"**Open this URL in your browser:** {flow.get('verification_uri', '')}\n\n"
-            f"**Enter code:** `{flow.get('user_code', '')}`",
+            f"**Step 1 — Open this URL in your browser:**\n\n"
+            f"👉 [{flow.get('verification_uri', '')}]({flow.get('verification_uri', '')})\n\n"
+            f"**Step 2 — Enter this code:** &nbsp; `{flow.get('user_code', '')}`\n\n"
+            f"**Step 3 — Sign in** with your `{GRAPH_MAILBOX if 'GRAPH_MAILBOX' in dir() else 'd.banerjee@...'}`"
+            f" Microsoft account, then click the button below.",
             icon="🌐",
         )
-        if st.button("I've signed in — complete authentication"):
+        if st.button("✅ I've signed in — complete authentication", type="primary"):
             with st.spinner("Completing sign-in…"):
                 try:
                     complete_device_flow(flow)
                     del st.session_state["device_flow"]
-                    st.success("Signed in successfully!")
+                    st.success("✓ Signed in successfully!")
+
+                    # ── Show token for Streamlit secrets persistence ──────────
+                    token_str = get_token_cache_string()
+                    if token_str:
+                        st.warning(
+                            "**Important — save your sign-in for future restarts.**\n\n"
+                            "Streamlit Cloud wipes its file system on every redeploy. "
+                            "To avoid signing in again, copy the value below and add it to "
+                            "**Streamlit Cloud → Settings → Secrets** as:\n\n"
+                            "```toml\nGRAPH_TOKEN_CACHE = '<paste here>'\n```",
+                            icon="💾",
+                        )
+                        st.code(token_str, language="json")
                     st.rerun()
                 except Exception as ex:
                     st.error(f"Sign-in failed: {ex}")
