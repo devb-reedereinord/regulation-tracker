@@ -179,44 +179,77 @@ def _source_tag(source: str) -> str:
     return f'<span class="source-tag">{source or "—"}</span>' if source else ""
 
 
-def _extract_pdf_text(uploaded_file, max_chars: int = 60000) -> str:
-    """Extract all text from a Streamlit UploadedFile PDF object."""
-    try:
-        import io
-        from pypdf import PdfReader
-        reader = PdfReader(io.BytesIO(uploaded_file.read()))
-        pages = []
-        for page in reader.pages:
-            t = page.extract_text() or ""
-            if t.strip():
-                pages.append(t.strip())
-        return "\n\n".join(pages)[:max_chars]
-    except Exception as ex:
-        return f"[PDF extraction error: {ex}]"
-
-
-def _ingest_pdf_regulations(pdf_text: str, source_label: str, filename: str) -> dict:
+def _extract_pdf_pages(uploaded_file) -> list[str]:
     """
-    Run the AI extraction pipeline on raw PDF text and save each item as a Regulation.
-    Returns {"created": N, "skipped": N, "items": [...titles...]}
+    Extract text from every page of a PDF.
+    Returns a list of page text strings (one per page).
+    """
+    import io
+    from pypdf import PdfReader
+    reader = PdfReader(io.BytesIO(uploaded_file.read()))
+    pages = []
+    for page in reader.pages:
+        t = (page.extract_text() or "").strip()
+        pages.append(t)   # keep even if empty so page numbers stay aligned
+    return pages
+
+
+def _chunk_pages(pages: list[str], chunk_chars: int = 16000) -> list[str]:
+    """
+    Group consecutive pages into chunks that stay under chunk_chars.
+    Splits at page boundaries so regulations are never cut in half mid-item.
+    """
+    chunks, current, current_len = [], [], 0
+    for page_text in pages:
+        page_len = len(page_text)
+        if current and current_len + page_len > chunk_chars:
+            chunks.append("\n\n".join(current))
+            current, current_len = [], 0
+        current.append(page_text)
+        current_len += page_len
+    if current:
+        chunks.append("\n\n".join(current))
+    return [c for c in chunks if c.strip()]
+
+
+def _ingest_pdf_regulations(pages: list[str], source_label: str, filename: str) -> dict:
+    """
+    Chunk the PDF pages and run the AI extraction pipeline on each chunk.
+    Combines all results and saves each regulation item to the DB.
+    Returns {"created": N, "skipped": N, "chunks": C, "items": [...titles...]}
     """
     from agent import _extract_obligations_with_ai
-    obligations = _extract_obligations_with_ai(
-        subject=filename,
-        body_preview="",
-        body_html="",
-        attachment_text=pdf_text,
-    )
-    created = 0
-    skipped = 0
-    titles = []
+    from sqlalchemy import and_
+
+    chunks = _chunk_pages(pages, chunk_chars=16000)
+    all_obligations = []
+
+    for i, chunk in enumerate(chunks):
+        obs = _extract_obligations_with_ai(
+            subject=f"{filename} [part {i+1}/{len(chunks)}]",
+            body_preview="",
+            body_html="",
+            attachment_text=chunk,
+        )
+        all_obligations.extend(obs)
+
+    # Deduplicate across chunks by normalised title
+    seen_titles: set[str] = set()
+    unique_obligations = []
+    for ob in all_obligations:
+        key = (ob.get("title") or "").strip().lower()
+        if key and key not in seen_titles:
+            seen_titles.add(key)
+            unique_obligations.append(ob)
+
+    created, skipped = 0, 0
+    titles: list[str] = []
+
     with SessionLocal() as s:
-        for ob in obligations:
-            title = ob.get("title", "").strip()
+        for ob in unique_obligations:
+            title = (ob.get("title") or "").strip()
             if not title:
                 continue
-            # Deduplicate by exact title + source
-            from sqlalchemy import and_
             existing = s.execute(
                 select(Regulation).where(
                     and_(Regulation.title == title, Regulation.source == source_label)
@@ -236,8 +269,6 @@ def _ingest_pdf_regulations(pdf_text: str, source_label: str, filename: str) -> 
             )
             s.add(reg)
             s.flush()
-            # Store filename as a link/attachment reference
-            from models import RegulationLink
             lnk = RegulationLink(
                 regulation_id=reg.id,
                 url=filename,
@@ -248,7 +279,8 @@ def _ingest_pdf_regulations(pdf_text: str, source_label: str, filename: str) -> 
             created += 1
             titles.append(title)
         s.commit()
-    return {"created": created, "skipped": skipped, "items": titles}
+
+    return {"created": created, "skipped": skipped, "chunks": len(chunks), "items": titles}
 
 
 def load_regulations(status_filter=None, source_filter=None, search=None):
@@ -438,21 +470,88 @@ if uploaded_pdf is not None:
     st.markdown(f"**{uploaded_pdf.name}** — {uploaded_pdf.size / 1024:.0f} KB")
 
     if st.button("Extract Regulations from PDF", type="primary"):
-        with st.spinner("Reading PDF…"):
-            pdf_text = _extract_pdf_text(uploaded_pdf)
+        try:
+            with st.spinner("Reading PDF pages…"):
+                pages = _extract_pdf_pages(uploaded_pdf)
+            total_chars = sum(len(p) for p in pages)
+            n_chunks = len(_chunk_pages(pages, chunk_chars=16000))
+            st.info(
+                f"📄 {len(pages)} pages · {total_chars:,} characters · "
+                f"will process in **{n_chunks} chunk(s)**"
+            )
 
-        if pdf_text.startswith("[PDF extraction error"):
-            st.error(pdf_text)
-        else:
-            char_count = len(pdf_text)
-            with st.spinner(f"AI is analysing {char_count:,} characters of regulatory text…"):
-                result = _ingest_pdf_regulations(
-                    pdf_text=pdf_text,
-                    source_label=pdf_source_label.strip() or "PDF Upload",
-                    filename=uploaded_pdf.name,
+            progress = st.progress(0, text="Starting AI extraction…")
+            all_obligations = []
+
+            from agent import _extract_obligations_with_ai
+            chunks = _chunk_pages(pages, chunk_chars=16000)
+
+            for i, chunk in enumerate(chunks):
+                progress.progress(
+                    (i + 1) / len(chunks),
+                    text=f"Processing chunk {i+1} of {len(chunks)}…"
                 )
+                obs = _extract_obligations_with_ai(
+                    subject=f"{uploaded_pdf.name} [part {i+1}/{len(chunks)}]",
+                    body_preview="",
+                    body_html="",
+                    attachment_text=chunk,
+                )
+                all_obligations.extend(obs)
 
-            if result["created"] == 0 and result["skipped"] == 0:
+            progress.progress(1.0, text="Saving to database…")
+
+            # Dedup across chunks then save
+            from sqlalchemy import and_
+            seen: set[str] = set()
+            unique_obs = []
+            for ob in all_obligations:
+                key = (ob.get("title") or "").strip().lower()
+                if key and key not in seen:
+                    seen.add(key)
+                    unique_obs.append(ob)
+
+            created, skipped, titles = 0, 0, []
+            with SessionLocal() as s:
+                for ob in unique_obs:
+                    title = (ob.get("title") or "").strip()
+                    if not title:
+                        continue
+                    existing = s.execute(
+                        select(Regulation).where(
+                            and_(
+                                Regulation.title == title,
+                                Regulation.source == (pdf_source_label.strip() or "PDF Upload"),
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if existing:
+                        skipped += 1
+                        continue
+                    reg = Regulation(
+                        title=title,
+                        source=pdf_source_label.strip() or "PDF Upload",
+                        summary=ob.get("description") or None,
+                        effective_date=ob.get("due_date") or None,
+                        category=join_multi(ob.get("departments") or []),
+                        jurisdiction="Global",
+                        status="Open",
+                    )
+                    s.add(reg)
+                    s.flush()
+                    s.add(RegulationLink(
+                        regulation_id=reg.id,
+                        url=uploaded_pdf.name,
+                        title=uploaded_pdf.name,
+                        link_type="pdf",
+                    ))
+                    created += 1
+                    titles.append(title)
+                s.commit()
+
+            progress.empty()
+
+            if created == 0 and skipped == 0:
                 st.warning(
                     "No regulation items were extracted. "
                     "Check that the PDF contains structured regulatory content "
@@ -460,15 +559,19 @@ if uploaded_pdf is not None:
                 )
             else:
                 st.success(
-                    f"✓ **{result['created']}** regulation(s) added, "
-                    f"**{result['skipped']}** already existed."
+                    f"✓ **{created}** regulation(s) added &nbsp;·&nbsp; "
+                    f"**{skipped}** already existed &nbsp;·&nbsp; "
+                    f"**{n_chunks}** chunks processed"
                 )
-                if result["items"]:
-                    with st.expander(f"View extracted items ({len(result['items'])})"):
-                        for i, t in enumerate(result["items"], 1):
+                if titles:
+                    with st.expander(f"View {len(titles)} extracted regulation(s)"):
+                        for i, t in enumerate(titles, 1):
                             st.markdown(f"{i}. {t}")
-                if result["created"]:
+                if created:
                     st.rerun()
+
+        except Exception as _pdf_ex:
+            st.error(f"PDF processing failed: {_pdf_ex}")
 
 st.divider()
 
