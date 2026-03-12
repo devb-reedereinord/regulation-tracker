@@ -3,7 +3,7 @@ import pandas as pd
 from sqlalchemy import select
 from datetime import datetime
 
-from models import SessionLocal, Regulation, RegulationLink, KvStore
+from models import SessionLocal, Regulation, RegulationLink, KvStore, normalize_departments, join_multi
 
 from web_monitor import discover_articles
 from web_ingest import ingest_web_article
@@ -179,6 +179,78 @@ def _source_tag(source: str) -> str:
     return f'<span class="source-tag">{source or "—"}</span>' if source else ""
 
 
+def _extract_pdf_text(uploaded_file, max_chars: int = 60000) -> str:
+    """Extract all text from a Streamlit UploadedFile PDF object."""
+    try:
+        import io
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(uploaded_file.read()))
+        pages = []
+        for page in reader.pages:
+            t = page.extract_text() or ""
+            if t.strip():
+                pages.append(t.strip())
+        return "\n\n".join(pages)[:max_chars]
+    except Exception as ex:
+        return f"[PDF extraction error: {ex}]"
+
+
+def _ingest_pdf_regulations(pdf_text: str, source_label: str, filename: str) -> dict:
+    """
+    Run the AI extraction pipeline on raw PDF text and save each item as a Regulation.
+    Returns {"created": N, "skipped": N, "items": [...titles...]}
+    """
+    from agent import _extract_obligations_with_ai
+    obligations = _extract_obligations_with_ai(
+        subject=filename,
+        body_preview="",
+        body_html="",
+        attachment_text=pdf_text,
+    )
+    created = 0
+    skipped = 0
+    titles = []
+    with SessionLocal() as s:
+        for ob in obligations:
+            title = ob.get("title", "").strip()
+            if not title:
+                continue
+            # Deduplicate by exact title + source
+            from sqlalchemy import and_
+            existing = s.execute(
+                select(Regulation).where(
+                    and_(Regulation.title == title, Regulation.source == source_label)
+                )
+            ).scalar_one_or_none()
+            if existing:
+                skipped += 1
+                continue
+            reg = Regulation(
+                title=title,
+                source=source_label,
+                summary=ob.get("description") or None,
+                effective_date=ob.get("due_date") or None,
+                category=join_multi(ob.get("departments") or []),
+                jurisdiction="Global",
+                status="Open",
+            )
+            s.add(reg)
+            s.flush()
+            # Store filename as a link/attachment reference
+            from models import RegulationLink
+            lnk = RegulationLink(
+                regulation_id=reg.id,
+                url=filename,
+                title=filename,
+                link_type="pdf",
+            )
+            s.add(lnk)
+            created += 1
+            titles.append(title)
+        s.commit()
+    return {"created": created, "skipped": skipped, "items": titles}
+
+
 def load_regulations(status_filter=None, source_filter=None, search=None):
     with SessionLocal() as s:
         regs = s.execute(select(Regulation).order_by(Regulation.received_at.desc())).scalars().all()
@@ -342,6 +414,64 @@ if st.button("Scan Regulatory Websites", type="primary"):
 
 st.divider()
 
+# ── PDF Upload ────────────────────────────────────────────────────────────────
+st.markdown("## PDF Upload")
+st.caption("Upload a regulatory digest PDF (Lloyd's Register, DNV, Gard, IMO) — AI will extract every regulation item automatically.")
+
+_up_col, _cfg_col = st.columns([2, 1])
+
+with _up_col:
+    uploaded_pdf = st.file_uploader(
+        "Drop a PDF here or click to browse",
+        type=["pdf"],
+        label_visibility="collapsed",
+    )
+
+with _cfg_col:
+    pdf_source_label = st.text_input(
+        "Source label",
+        value="Lloyd's Register",
+        help="Tag applied to all regulations extracted from this PDF (e.g. Lloyd's Register, DNV, Gard)",
+    )
+
+if uploaded_pdf is not None:
+    st.markdown(f"**{uploaded_pdf.name}** — {uploaded_pdf.size / 1024:.0f} KB")
+
+    if st.button("Extract Regulations from PDF", type="primary"):
+        with st.spinner("Reading PDF…"):
+            pdf_text = _extract_pdf_text(uploaded_pdf)
+
+        if pdf_text.startswith("[PDF extraction error"):
+            st.error(pdf_text)
+        else:
+            char_count = len(pdf_text)
+            with st.spinner(f"AI is analysing {char_count:,} characters of regulatory text…"):
+                result = _ingest_pdf_regulations(
+                    pdf_text=pdf_text,
+                    source_label=pdf_source_label.strip() or "PDF Upload",
+                    filename=uploaded_pdf.name,
+                )
+
+            if result["created"] == 0 and result["skipped"] == 0:
+                st.warning(
+                    "No regulation items were extracted. "
+                    "Check that the PDF contains structured regulatory content "
+                    "(entry into force dates, MARPOL/SOLAS references, etc.)"
+                )
+            else:
+                st.success(
+                    f"✓ **{result['created']}** regulation(s) added, "
+                    f"**{result['skipped']}** already existed."
+                )
+                if result["items"]:
+                    with st.expander(f"View extracted items ({len(result['items'])})"):
+                        for i, t in enumerate(result["items"], 1):
+                            st.markdown(f"{i}. {t}")
+                if result["created"]:
+                    st.rerun()
+
+st.divider()
+
 # ── Email monitor ─────────────────────────────────────────────────────────────
 st.markdown("## Email Monitor")
 
@@ -466,7 +596,6 @@ with st.form("manual_reg", clear_on_submit=True):
             st.error("Title is required.")
         else:
             with SessionLocal() as s:
-                from models import join_multi, normalize_departments
                 reg = Regulation(
                     title=title.strip(),
                     source=source.strip() or None,
@@ -480,5 +609,3 @@ with st.form("manual_reg", clear_on_submit=True):
                 s.commit()
             st.success("Regulation created.")
             st.rerun()
-
-
