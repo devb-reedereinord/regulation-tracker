@@ -81,6 +81,8 @@ class Regulation(Base):
     received_at = Column(DateTime, default=datetime.utcnow)
     summary = Column(Text)
     status = Column(String, default="N/A")  # Open | In Progress | Closed | N/A
+    # Semicolon-separated fleet types this regulation applies to, e.g. "Container Vessels;Bulk Carriers"
+    fleet_tags = Column(Text, nullable=True)
 
     links = relationship("RegulationLink", back_populates="regulation", cascade="all, delete-orphan")
     actions = relationship("Action", back_populates="regulation", cascade="all, delete-orphan")
@@ -122,5 +124,16 @@ class KvStore(Base):
 
 # --- DB init & seed ---
 Base.metadata.create_all(engine)
+
+# Auto-migrate: add fleet_tags column if it doesn't exist yet (SQLite safe)
+with engine.connect() as _conn:
+    _cols = [row[1] for row in _conn.execute(
+        __import__("sqlalchemy").text("PRAGMA table_info(regulations)")
+    )]
+    if "fleet_tags" not in _cols:
+        _conn.execute(__import__("sqlalchemy").text(
+            "ALTER TABLE regulations ADD COLUMN fleet_tags TEXT"
+        ))
+        _conn.commit()
 
 
