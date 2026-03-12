@@ -335,17 +335,34 @@ def _extract_obligations_with_ai(subject: str, body_preview: str, body_html: str
             "Each item is a separate obligation entry."
         )
         prompt = f"""
-The attached document is a maritime regulatory digest.  Extract EVERY individual regulatory item
-as a separate obligation.  For each item return:
-- title: concise description of the regulation change (include the regulation reference if present,
-  e.g. 'MARPOL Annex VI Reg 14 – In-use fuel oil sampling points')
-- description: 2-4 sentences covering what changed, who is affected, and the key implication
-  for ship operators/owners
-- due_date: the entry into force date in YYYY-MM-DD format, or null if unknown/future
-- department: which internal departments are affected — choose from
-  ["Marine Ops", "Technical", "HSEQ", "Crewing", "Human Resourses"]
+The attached document is a maritime regulatory digest. Extract EVERY individual regulatory item
+as a separate obligation. For each item return:
 
-Return ONLY JSON:
+- title: regulation title with reference, e.g.
+  "MARPOL Annex VI Reg 14 – In-use fuel oil sampling points (MEPC.324(75))"
+
+- description: structured markdown summary using this EXACT layout —
+
+    One sentence overview of what changed and why it matters.
+
+    **Key requirements:**
+    - Specific obligation 1 (e.g. "Ships must install a designated in-use fuel oil sampling point")
+    - Specific obligation 2
+    - Specific obligation 3
+    (Include up to 6 bullets covering every distinct obligation or compliance step)
+
+    **Applies to:** Ship types, sizes (GT/DWT thresholds), new vs existing ships, flag states.
+
+    **Entry into force:** Date and any phase-in details (new ships vs existing ships if different).
+
+  Use **bold** for the three section labels exactly as shown above.
+
+- due_date: earliest entry into force date as YYYY-MM-DD, or null if not yet determined
+
+- department: internal departments affected — choose only from
+  ["Marine Ops", "Technical", "HSEQ", "Crewing", "Human Resources"]
+
+Return ONLY valid JSON — no markdown fences, no commentary outside the JSON:
 {{
   "obligations": [
     {{
@@ -358,10 +375,8 @@ Return ONLY JSON:
 }}
 
 Rules:
-- Extract EVERY numbered regulation entry you find.
-- Prefer the earliest / most relevant effective date for due_date.
-- If the document covers many items only relevant to tankers/chemical tankers, still extract all.
-- Do not fabricate items.  Do not add commentary outside the JSON.
+- Extract EVERY numbered regulation entry — do not skip any.
+- Do not fabricate items. Do not add commentary outside the JSON.
 
 Email subject: {subject}
 
@@ -374,14 +389,14 @@ Regulatory document text (may be truncated at {len(attachment_text)} chars):
         system_msg = "You extract maritime compliance obligations and deadlines from emails."
         prompt = f"""
 Extract concrete regulatory obligations or compliance tasks from this email.
-Return ONLY JSON in this schema:
+Return ONLY valid JSON in this schema — no markdown fences, no commentary:
 {{
   "obligations": [
     {{
       "title": "short obligation title",
-      "description": "one or two sentences",
+      "description": "structured markdown: one overview sentence, then **Key requirements:** bullets, **Applies to:**, **Entry into force:**",
       "due_date": "YYYY-MM-DD or null",
-      "department": ["Marine Ops", "Technical", "HSEQ", "Crewing", "Human Resourses"]
+      "department": ["Marine Ops", "Technical", "HSEQ", "Crewing", "Human Resources"]
     }}
   ]
 }}
@@ -389,7 +404,6 @@ Return ONLY JSON in this schema:
 Rules:
 - Only capture concrete compliance tasks with clear deadlines.
 - Return an empty list if there are no obligations.
-- Do not include commentary outside JSON.
 
 Email subject: {subject}
 Email body preview: {body_preview}
