@@ -1,8 +1,0 @@
-streamlit
-sqlalchemy
-pandas
-requests
-beautifulsoup4
-lxml
-python-dateutil
-openai
