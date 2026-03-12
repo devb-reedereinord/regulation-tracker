@@ -632,6 +632,64 @@ def _send_notification(reg: Regulation, to_list: List[str], subj: str, sender: s
 
 
 # ---------------------------------------------------------------------------
+# Re-summarize an existing regulation using AI
+# ---------------------------------------------------------------------------
+def resummary_with_ai(title: str, source: str) -> str:
+    """
+    Generate a rich structured markdown summary for an existing regulation
+    based solely on its title and source (no original document needed).
+    Returns the markdown string, or empty string if OpenAI is unavailable.
+    """
+    if not OPENAI_API_KEY:
+        return ""
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    prompt = f"""You are a maritime compliance analyst for Reederei Nord Group,
+a professional ship management company that manages Container Vessels, Bulk Carriers, and Tankers.
+
+Generate a detailed structured markdown summary for the following maritime regulation.
+You MUST use the exact multi-section format below — do NOT collapse everything into one sentence.
+
+Regulation title: {title}
+Source / publisher: {source or 'IMO / Classification Society'}
+
+Required output format (replace bracketed text with real content):
+
+One clear sentence explaining what this regulation changes and why it matters.
+
+**Key requirements:**
+- [Specific obligation or compliance step 1]
+- [Specific obligation or compliance step 2]
+- [Add up to 6 bullets — each a distinct, concrete requirement]
+
+**Applies to:** [Which ship types, minimum GT/DWT thresholds, new ships vs existing ships, flag state scope]
+
+**Entry into force:** [Date. Include phase-in details if different for new vs existing ships.]
+
+**Reederei Nord relevance:** [Which of Reederei Nord's fleet types (Container Vessels / Bulk Carriers / Tankers) are affected and what specific action is required.]
+
+Return ONLY the formatted markdown — no preamble, no code fences, no extra commentary."""
+
+    try:
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You produce detailed, multi-section maritime regulatory summaries in markdown.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as ex:
+        print(f"[WARN] resummary_with_ai failed for '{title}': {ex}")
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # Main ingestion
 # ---------------------------------------------------------------------------
 def ingest_once(limit: int = 50, dry_run: bool = False) -> dict:
