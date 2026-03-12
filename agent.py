@@ -343,7 +343,7 @@ Rules:
 Email subject: {subject}
 
 Regulatory document text (may be truncated at {len(attachment_text)} chars):
-{attachment_text[:14000]}
+{attachment_text[:18000]}
 """.strip()
 
     else:
