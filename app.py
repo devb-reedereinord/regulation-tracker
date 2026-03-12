@@ -189,7 +189,7 @@ with st.sidebar:
     st.markdown("## Filters")
     status_filter = st.selectbox("Status", ["All", "Open", "In Progress", "Closed", "N/A"])
     with SessionLocal() as _s:
-        _all_sources = [r.source for r in _s.execute(select(Regulation.source).distinct()).scalars().all() if r]
+        _all_sources = [r for r in _s.execute(select(Regulation.source).distinct()).scalars().all() if r]
     source_filter = st.selectbox("Source", ["All"] + sorted(set(_all_sources)))
     search_term = st.text_input("Search title / summary", placeholder="e.g. MARPOL, EEXI…")
 
