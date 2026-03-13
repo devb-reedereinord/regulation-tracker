@@ -83,6 +83,8 @@ class Regulation(Base):
     status = Column(String, default="N/A")  # Open | In Progress | Closed | N/A
     # Semicolon-separated fleet types this regulation applies to, e.g. "Container Vessels;Bulk Carriers"
     fleet_tags = Column(Text, nullable=True)
+    # Person(s) responsible for actioning this regulation (free text, semicolon-separated)
+    assignee = Column(Text, nullable=True)
 
     links = relationship("RegulationLink", back_populates="regulation", cascade="all, delete-orphan")
     actions = relationship("Action", back_populates="regulation", cascade="all, delete-orphan")
@@ -133,6 +135,11 @@ with engine.connect() as _conn:
     if "fleet_tags" not in _cols:
         _conn.execute(__import__("sqlalchemy").text(
             "ALTER TABLE regulations ADD COLUMN fleet_tags TEXT"
+        ))
+        _conn.commit()
+    if "assignee" not in _cols:
+        _conn.execute(__import__("sqlalchemy").text(
+            "ALTER TABLE regulations ADD COLUMN assignee TEXT"
         ))
         _conn.commit()
 
