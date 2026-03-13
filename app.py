@@ -10,7 +10,7 @@ from web_ingest import ingest_web_article
 
 try:
     from agent import ingest_shared_mailbox, start_device_flow, complete_device_flow, get_token_cache_string, resummary_with_ai
-    from config import SHARED_MAILBOX, GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET
+    from config import SHARED_MAILBOX, GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET, EDIT_PASSWORD
     _EMAIL_IMPORTS_OK = True
     _EMAIL_IMPORT_ERR = ""
 except Exception as _e:
@@ -18,6 +18,10 @@ except Exception as _e:
     _EMAIL_IMPORT_ERR = str(_e)
     SHARED_MAILBOX = ""
     GRAPH_TENANT_ID = GRAPH_CLIENT_ID = GRAPH_CLIENT_SECRET = ""
+    try:
+        from config import EDIT_PASSWORD
+    except Exception:
+        EDIT_PASSWORD = ""
 
 # ── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -26,6 +30,9 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ── Session state defaults ────────────────────────────────────────────────────
+st.session_state.setdefault("edit_unlocked", False)
 
 # ── Global CSS ───────────────────────────────────────────────────────────────
 st.markdown("""
@@ -400,6 +407,7 @@ def load_regulations(status_filter=None, source_filter=None, search=None, fleet_
                 "Source": r.source or "—",
                 "Jurisdiction": r.jurisdiction or "—",
                 "Department": r.category or "—",
+                "Assigned To": r.assignee or "—",
                 "Effective": str(r.effective_date) if r.effective_date else "—",
                 "Status": r.status or "N/A",
                 "Fleet": r.fleet_tags or "—",
@@ -540,6 +548,10 @@ def _render_detail_panel(reg_id: int):
             unsafe_allow_html=True,
         )
 
+    # Reload reg.assignee fresh for display (it may have just been edited)
+    _assignee_display = reg.assignee or "—"
+    _dept_display = reg.category or "—"
+
     st.markdown(
         f"""
 <div style="background:#161b27;border:1px solid #334155;border-radius:14px;padding:1.4rem 1.6rem;margin:0.5rem 0 1rem;">
@@ -547,11 +559,70 @@ def _render_detail_panel(reg_id: int):
     {_status_badge(reg.status)}
     <span style="color:#94a3b8;font-size:0.82rem">📅 <strong style="color:#e2e8f0">{str(reg.effective_date) if reg.effective_date else '—'}</strong></span>
     <span style="color:#94a3b8;font-size:0.82rem">🌍 <strong style="color:#e2e8f0">{reg.jurisdiction or '—'}</strong></span>
-    <span style="color:#94a3b8;font-size:0.82rem">🏢 <strong style="color:#e2e8f0">{reg.category or '—'}</strong></span>
+    <span style="color:#94a3b8;font-size:0.82rem">🏢 <strong style="color:#e2e8f0">{_dept_display}</strong></span>
+    <span style="color:#94a3b8;font-size:0.82rem">👤 <strong style="color:#e2e8f0">{_assignee_display}</strong></span>
   </div>
 </div>""",
         unsafe_allow_html=True,
     )
+
+    # ── Edit expander (password-gated) ──
+    with st.expander("✏️ Edit Department & Assignee", expanded=False):
+        if not st.session_state.get("edit_unlocked"):
+            _pw_col, _btn_col = st.columns([3, 1])
+            with _pw_col:
+                _pw_input = st.text_input(
+                    "Editor password", type="password",
+                    key=f"edit_pw_{reg_id}", label_visibility="collapsed",
+                    placeholder="Enter editor password…"
+                )
+            with _btn_col:
+                if st.button("🔓 Unlock", key=f"edit_unlock_{reg_id}"):
+                    if _pw_input == EDIT_PASSWORD:
+                        st.session_state["edit_unlocked"] = True
+                        st.rerun()
+                    else:
+                        st.error("Incorrect password.")
+        else:
+            from config import DEPARTMENTS as _DEPTS
+            # Current departments as a list
+            _cur_depts = [d.strip() for d in (reg.category or "").split(";") if d.strip()]
+            _valid_cur_depts = [d for d in _cur_depts if d in _DEPTS]
+
+            _ed1, _ed2 = st.columns(2)
+            with _ed1:
+                _new_depts = st.multiselect(
+                    "Department(s)", options=_DEPTS,
+                    default=_valid_cur_depts,
+                    key=f"edit_depts_{reg_id}",
+                )
+            with _ed2:
+                _new_assignee = st.text_input(
+                    "Assigned To",
+                    value=reg.assignee or "",
+                    key=f"edit_assignee_{reg_id}",
+                    placeholder="e.g. J. Smith, M. Lopez",
+                    help="Separate multiple names with commas or semicolons",
+                )
+
+            _save_col, _lock_col = st.columns([1, 1])
+            with _save_col:
+                if st.button("💾 Save", key=f"edit_save_{reg_id}", type="primary"):
+                    with SessionLocal() as _es:
+                        _ereg = _es.get(Regulation, reg_id)
+                        if _ereg:
+                            _ereg.category = join_multi(normalize_departments(_new_depts))
+                            # Normalise assignee: allow comma or semicolon separators
+                            _ereg.assignee = join_multi(
+                                [n.strip() for n in _new_assignee.replace(",", ";").split(";") if n.strip()]
+                            )
+                            _es.commit()
+                    st.success("Saved.")
+                    st.rerun()
+            with _lock_col:
+                if st.button("🔒 Lock", key=f"edit_lock_{reg_id}"):
+                    st.session_state["edit_unlocked"] = False
+                    st.rerun()
 
     # ── Body: summary rendered as markdown ──
     st.markdown(reg.summary or "_No summary available._")
@@ -642,7 +713,7 @@ else:
 
     if view == "Table":
         df = pd.DataFrame(filtered)
-        display_cols = ["ID", "Title", "Source", "Fleet", "Department", "Effective", "Status"]
+        display_cols = ["ID", "Title", "Source", "Fleet", "Department", "Assigned To", "Effective", "Status"]
         event = st.dataframe(
             df[display_cols],
             use_container_width=True,
@@ -650,6 +721,16 @@ else:
             height=420,
             on_select="rerun",
             selection_mode="single-row",
+            column_config={
+                "ID": st.column_config.NumberColumn("ID", width=50),
+                "Title": st.column_config.TextColumn("Title", width=260),
+                "Source": st.column_config.TextColumn("Source", width=120),
+                "Fleet": st.column_config.TextColumn("Fleet", width=130),
+                "Department": st.column_config.TextColumn("Department", width=130),
+                "Assigned To": st.column_config.TextColumn("Assigned To", width=140),
+                "Effective": st.column_config.TextColumn("Effective", width=100),
+                "Status": st.column_config.TextColumn("Status", width=100),
+            },
         )
         if event.selection.rows:
             st.session_state["selected_reg_id"] = filtered[event.selection.rows[0]]["ID"]
@@ -668,13 +749,18 @@ else:
                             ft = ft.strip()
                             if ft:
                                 fleet_pills += f'<span style="display:inline-block;background:#0f2d1e;color:#34d399;border:1px solid #065f46;border-radius:5px;padding:1px 7px;font-size:0.68rem;font-weight:600;margin-right:4px">{ft}</span>'
+                    _card_assignee = row.get("Assigned To", "—")
+                    _assignee_html = (
+                        f'&nbsp;·&nbsp;<span>👤 {_card_assignee}</span>'
+                        if _card_assignee and _card_assignee != "—" else ""
+                    )
                     st.markdown(f"""
 <div class="reg-card">
   <div class="reg-card-title">{_source_tag(row['Source'])}{row['Title']}</div>
   <div class="reg-card-meta" style="margin:4px 0">
     {_status_badge(row['Status'])} &nbsp;
     <span>📅 {row['Effective']}</span> &nbsp;·&nbsp;
-    <span>🏢 {row['Department']}</span>
+    <span>🏢 {row['Department']}</span>{_assignee_html}
   </div>
   <div style="margin:4px 0">{fleet_pills}</div>
   <div style="color:#94a3b8;font-size:0.78rem;margin-top:0.3rem">{row['Summary'][:180]}{'…' if len(row['Summary']) > 180 else ''}</div>
@@ -965,6 +1051,11 @@ with st.form("manual_reg", clear_on_submit=True):
         title = st.text_input("Title *")
         source = st.text_input("Source (e.g. IMO, DNV, Lloyd's Register)")
         jurisdiction = st.text_input("Jurisdiction (e.g. Global, EU, USA)")
+        man_assignee = st.text_input(
+            "Assigned To",
+            placeholder="e.g. J. Smith, M. Lopez",
+            help="Person(s) responsible — separate multiple names with commas",
+        )
     with col2:
         from config import DEPARTMENTS, REG_STATUS_OPTIONS
         category = st.multiselect("Departments", DEPARTMENTS)
@@ -986,6 +1077,9 @@ with st.form("manual_reg", clear_on_submit=True):
                     effective_date=eff_date,
                     summary=summary.strip() or None,
                     status=status,
+                    assignee=join_multi(
+                        [n.strip() for n in man_assignee.replace(",", ";").split(";") if n.strip()]
+                    ) or None,
                 )
                 s.add(reg)
                 s.commit()
