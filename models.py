@@ -85,6 +85,13 @@ class Regulation(Base):
     fleet_tags = Column(Text, nullable=True)
     # Person(s) responsible for actioning this regulation (free text, semicolon-separated)
     assignee = Column(Text, nullable=True)
+    # Regulatory lifecycle status (separate from compliance status)
+    force_status = Column(String, nullable=True)   # "In Force" | "Upcoming" | "Draft" | "Unknown"
+    # Applicability extensions
+    construction_restriction = Column(Text, nullable=True)  # e.g. "Vessels built on or after 2024-01-01"
+    engine_restriction = Column(Text, nullable=True)        # e.g. "Diesel engines >130 kW"
+    # Formal instrument names, semicolon-separated, e.g. "MSC.474(101);MEPC.373(80)"
+    instruments = Column(Text, nullable=True)
 
     links = relationship("RegulationLink", back_populates="regulation", cascade="all, delete-orphan")
     actions = relationship("Action", back_populates="regulation", cascade="all, delete-orphan")
@@ -127,20 +134,20 @@ class KvStore(Base):
 # --- DB init & seed ---
 Base.metadata.create_all(engine)
 
-# Auto-migrate: add fleet_tags column if it doesn't exist yet (SQLite safe)
+# Auto-migrate: add missing columns (SQLite safe - ALTER TABLE ADD COLUMN is idempotent via check)
+from sqlalchemy import text as _text
 with engine.connect() as _conn:
-    _cols = [row[1] for row in _conn.execute(
-        __import__("sqlalchemy").text("PRAGMA table_info(regulations)")
-    )]
-    if "fleet_tags" not in _cols:
-        _conn.execute(__import__("sqlalchemy").text(
-            "ALTER TABLE regulations ADD COLUMN fleet_tags TEXT"
-        ))
-        _conn.commit()
-    if "assignee" not in _cols:
-        _conn.execute(__import__("sqlalchemy").text(
-            "ALTER TABLE regulations ADD COLUMN assignee TEXT"
-        ))
-        _conn.commit()
+    _cols = [row[1] for row in _conn.execute(_text("PRAGMA table_info(regulations)"))]
+    for _col_name, _col_def in [
+        ("fleet_tags",               "TEXT"),
+        ("assignee",                 "TEXT"),
+        ("force_status",             "TEXT"),
+        ("construction_restriction", "TEXT"),
+        ("engine_restriction",       "TEXT"),
+        ("instruments",              "TEXT"),
+    ]:
+        if _col_name not in _cols:
+            _conn.execute(_text(f"ALTER TABLE regulations ADD COLUMN {_col_name} {_col_def}"))
+            _conn.commit()
 
 
