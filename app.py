@@ -1,7 +1,8 @@
 import streamlit as st
 import pandas as pd
 from sqlalchemy import select
-from datetime import datetime
+from datetime import datetime, date
+from difflib import SequenceMatcher
 
 from models import SessionLocal, Regulation, RegulationLink, KvStore, normalize_departments, join_multi
 
@@ -238,6 +239,12 @@ hr { border-color: #1e2535 !important; margin: 1.5rem 0; }
 .badge-inprog  { background: #1d4ed822; color: #60a5fa; border: 1px solid #1d4ed855; }
 .badge-closed  { background: #05966922; color: #34d399; border: 1px solid #05966955; }
 .badge-na      { background: #37415122; color: #94a3b8; border: 1px solid #37415155; }
+/* Regulatory lifecycle badges */
+.reg-inforce  { background: #05966922; color: #34d399; border: 1px solid #05966955; }
+.reg-soon     { background: #b4530922; color: #fb923c; border: 1px solid #b4530955; }
+.reg-upcoming { background: #1d4ed822; color: #60a5fa; border: 1px solid #1d4ed855; }
+.reg-draft    { background: #71717a22; color: #a1a1aa; border: 1px solid #71717a55; }
+.reg-unknown  { background: #37415122; color: #94a3b8; border: 1px solid #37415155; }
 
 /* Regulation card */
 .reg-card {
@@ -276,6 +283,64 @@ def _status_badge(status: str) -> str:
 
 def _source_tag(source: str) -> str:
     return f'<span class="source-tag">{source or "—"}</span>' if source else ""
+
+
+_REG_STATUS_CSS = {
+    "In Force":           "reg-inforce",
+    "Upcoming ≤1 Month":  "reg-soon",
+    "Upcoming ≤3 Months": "reg-soon",
+    "Upcoming":           "reg-upcoming",
+    "Draft":              "reg-draft",
+    "Unknown":            "reg-unknown",
+}
+
+
+def _reg_status(reg) -> tuple[str, str]:
+    """
+    Compute regulatory lifecycle label + CSS class from force_status + effective_date.
+    Returns (label, css_class).
+    Separate from compliance status (Open / In Progress / Closed).
+    """
+    fs = getattr(reg, "force_status", None) or ""
+    ed = getattr(reg, "effective_date", None)
+    today = date.today()
+    if fs == "Draft":
+        return "Draft", "reg-draft"
+    if fs == "In Force" or (ed and ed <= today):
+        return "In Force", "reg-inforce"
+    if ed:
+        delta = (ed - today).days
+        if delta <= 31:
+            return "Upcoming ≤1 Month", "reg-soon"
+        if delta <= 90:
+            return "Upcoming ≤3 Months", "reg-soon"
+        return "Upcoming", "reg-upcoming"
+    return "Unknown", "reg-unknown"
+
+
+def _reg_status_badge(label: str) -> str:
+    cls = _REG_STATUS_CSS.get(label, "reg-unknown")
+    return f'<span class="badge {cls}">{label}</span>'
+
+
+def _find_similar_regulations(title: str, source: str, s, cutoff: float = 0.75) -> list[dict]:
+    """
+    Return existing DB regulations whose title is >= cutoff similar to the given title.
+    Uses SequenceMatcher for fuzzy comparison.
+    """
+    norm_new = title.strip().lower()
+    existing = s.execute(select(Regulation.id, Regulation.title, Regulation.source)).all()
+    matches = []
+    for row in existing:
+        ratio = SequenceMatcher(None, norm_new, (row.title or "").strip().lower()).ratio()
+        if ratio >= cutoff:
+            matches.append({
+                "id": row.id,
+                "title": row.title,
+                "source": row.source,
+                "ratio": ratio,
+            })
+    return sorted(matches, key=lambda x: -x["ratio"])
 
 
 def _extract_pdf_pages(uploaded_file) -> list[str]:
@@ -386,7 +451,29 @@ def _ingest_pdf_regulations(pages: list[str], source_label: str, filename: str) 
 FLEET_TYPES = ["Container Vessels", "Bulk Carriers", "Tankers"]
 
 
-def load_regulations(status_filter=None, source_filter=None, search=None, fleet_filter=None):
+def load_regulations(status_filter=None, source_filter=None, search=None, fleet_filter=None, force_filter=None):
+    today = date.today()
+
+    def _matches_force(r) -> bool:
+        if not force_filter or force_filter == "All":
+            return True
+        fs = getattr(r, "force_status", None) or ""
+        ed = getattr(r, "effective_date", None)
+        if force_filter == "Draft / Unknown":
+            return fs == "Draft" or (not ed and fs not in ("In Force",))
+        if force_filter == "In Force":
+            return fs == "In Force" or (ed and ed <= today)
+        if not ed:
+            return False
+        delta = (ed - today).days
+        if force_filter == "≤ 1 Month":
+            return 0 < delta <= 31
+        if force_filter == "≤ 3 Months":
+            return 0 < delta <= 90
+        if force_filter == "> 3 Months":
+            return delta > 90
+        return True
+
     with SessionLocal() as s:
         regs = s.execute(select(Regulation).order_by(Regulation.received_at.desc())).scalars().all()
         rows = []
@@ -401,6 +488,9 @@ def load_regulations(status_filter=None, source_filter=None, search=None, fleet_
                 tags = r.fleet_tags or ""
                 if fleet_filter.lower() not in tags.lower():
                     continue
+            if not _matches_force(r):
+                continue
+            _rs_label, _ = _reg_status(r)
             rows.append({
                 "ID": r.id,
                 "Title": r.title,
@@ -410,6 +500,7 @@ def load_regulations(status_filter=None, source_filter=None, search=None, fleet_
                 "Assigned To": getattr(r, "assignee", None) or "—",
                 "Effective": str(r.effective_date) if r.effective_date else "—",
                 "Status": r.status or "N/A",
+                "Reg. Status": _rs_label,
                 "Fleet": r.fleet_tags or "—",
                 "Summary": (r.summary or "")[:120] + "…" if len(r.summary or "") > 120 else (r.summary or ""),
             })
@@ -428,6 +519,11 @@ with st.sidebar:
         _all_sources = [r for r in _s.execute(select(Regulation.source).distinct()).scalars().all() if r]
     source_filter = st.selectbox("Source", ["All"] + sorted(set(_all_sources)))
     fleet_filter = st.selectbox("Fleet type", ["All"] + FLEET_TYPES)
+    force_filter = st.selectbox(
+        "Entry into Force",
+        ["All", "In Force", "≤ 1 Month", "≤ 3 Months", "> 3 Months", "Draft / Unknown"],
+        help="Filter by regulatory lifecycle: whether a regulation is already in force, entering soon, or still a draft.",
+    )
     search_term = st.text_input("Search title / summary", placeholder="e.g. MARPOL, EEXI…")
 
     st.divider()
@@ -552,22 +648,39 @@ def _render_detail_panel(reg_id: int):
     _assignee_display = getattr(reg, "assignee", None) or "—"
     _dept_display = reg.category or "—"
 
+    _rs_label, _rs_cls = _reg_status(reg)
+    _instr_display = getattr(reg, "instruments", None) or ""
+    _const_display = getattr(reg, "construction_restriction", None) or ""
+    _eng_display = getattr(reg, "engine_restriction", None) or ""
+
+    # Instruments formatted as bullet dots
+    _instr_html = ""
+    if _instr_display:
+        _instr_html = f'<div style="margin-top:0.6rem;color:#94a3b8;font-size:0.8rem">📜 <strong style="color:#e2e8f0">Instruments:</strong> {_instr_display.replace(";", " · ")}</div>'
+    _const_html = f'<div style="margin-top:0.3rem;color:#94a3b8;font-size:0.8rem">🚢 <strong style="color:#e2e8f0">Construction restriction:</strong> {_const_display}</div>' if _const_display else ""
+    _eng_html = f'<div style="margin-top:0.3rem;color:#94a3b8;font-size:0.8rem">⚙️ <strong style="color:#e2e8f0">Engine restriction:</strong> {_eng_display}</div>' if _eng_display else ""
+
     st.markdown(
         f"""
 <div style="background:#161b27;border:1px solid #334155;border-radius:14px;padding:1.4rem 1.6rem;margin:0.5rem 0 1rem;">
-  <div style="display:flex;gap:1.2rem;align-items:center;flex-wrap:wrap;margin-bottom:1rem;">
+  <div style="display:flex;gap:1.2rem;align-items:center;flex-wrap:wrap;margin-bottom:0.6rem;">
     {_status_badge(reg.status)}
+    {_reg_status_badge(_rs_label)}
     <span style="color:#94a3b8;font-size:0.82rem">📅 <strong style="color:#e2e8f0">{str(reg.effective_date) if reg.effective_date else '—'}</strong></span>
     <span style="color:#94a3b8;font-size:0.82rem">🌍 <strong style="color:#e2e8f0">{reg.jurisdiction or '—'}</strong></span>
     <span style="color:#94a3b8;font-size:0.82rem">🏢 <strong style="color:#e2e8f0">{_dept_display}</strong></span>
     <span style="color:#94a3b8;font-size:0.82rem">👤 <strong style="color:#e2e8f0">{_assignee_display}</strong></span>
   </div>
+  <div style="font-size:0.72rem;color:#64748b;margin-bottom:0.6rem">
+    ⓘ Compliance status (left badge) tracks your team's response. Regulatory status (right badge) tracks the regulation's lifecycle.
+  </div>
+  {_instr_html}{_const_html}{_eng_html}
 </div>""",
         unsafe_allow_html=True,
     )
 
     # ── Edit expander (password-gated) ──
-    with st.expander("✏️ Edit Department & Assignee", expanded=False):
+    with st.expander("✏️ Edit Department, Assignee & Regulatory Details", expanded=False):
         if not st.session_state.get("edit_unlocked"):
             _pw_col, _btn_col = st.columns([3, 1])
             with _pw_col:
@@ -605,6 +718,44 @@ def _render_detail_panel(reg_id: int):
                     help="Separate multiple names with commas or semicolons",
                 )
 
+            _FORCE_OPTIONS = ["Unknown", "Draft", "Upcoming", "In Force"]
+            _cur_force = getattr(reg, "force_status", None) or "Unknown"
+            _force_idx = _FORCE_OPTIONS.index(_cur_force) if _cur_force in _FORCE_OPTIONS else 0
+
+            _ed3, _ed4 = st.columns(2)
+            with _ed3:
+                _new_force = st.selectbox(
+                    "Regulatory Status",
+                    _FORCE_OPTIONS,
+                    index=_force_idx,
+                    key=f"edit_force_{reg_id}",
+                    help="Lifecycle of the regulation itself (distinct from your compliance status)",
+                )
+            with _ed4:
+                _new_instruments = st.text_input(
+                    "Instrument references",
+                    value=getattr(reg, "instruments", None) or "",
+                    key=f"edit_instruments_{reg_id}",
+                    placeholder="e.g. MSC.474(101), MEPC.373(80)",
+                    help="Comma-separated formal instrument names",
+                )
+
+            _ed5, _ed6 = st.columns(2)
+            with _ed5:
+                _new_const = st.text_input(
+                    "Construction restriction",
+                    value=getattr(reg, "construction_restriction", None) or "",
+                    key=f"edit_const_{reg_id}",
+                    placeholder="e.g. vessels built on or after 2024-01-01",
+                )
+            with _ed6:
+                _new_eng = st.text_input(
+                    "Engine restriction",
+                    value=getattr(reg, "engine_restriction", None) or "",
+                    key=f"edit_eng_{reg_id}",
+                    placeholder="e.g. diesel engines >130 kW",
+                )
+
             _save_col, _lock_col = st.columns([1, 1])
             with _save_col:
                 if st.button("💾 Save", key=f"edit_save_{reg_id}", type="primary"):
@@ -612,10 +763,15 @@ def _render_detail_panel(reg_id: int):
                         _ereg = _es.get(Regulation, reg_id)
                         if _ereg:
                             _ereg.category = join_multi(normalize_departments(_new_depts))
-                            # Normalise assignee: allow comma or semicolon separators
                             _ereg.assignee = join_multi(
                                 [n.strip() for n in _new_assignee.replace(",", ";").split(";") if n.strip()]
                             )
+                            _ereg.force_status = _new_force
+                            _ereg.instruments = join_multi(
+                                [i.strip() for i in _new_instruments.replace(",", ";").split(";") if i.strip()]
+                            ) or None
+                            _ereg.construction_restriction = _new_const.strip() or None
+                            _ereg.engine_restriction = _new_eng.strip() or None
                             _es.commit()
                     st.success("Saved.")
                     st.rerun()
@@ -700,7 +856,7 @@ st.markdown("## Regulations")
 if "selected_reg_id" in st.session_state:
     _render_detail_panel(st.session_state["selected_reg_id"])
 
-filtered = load_regulations(status_filter, source_filter, search_term, fleet_filter)
+filtered = load_regulations(status_filter, source_filter, search_term, fleet_filter, force_filter)
 
 if not filtered:
     st.info("No regulations match the current filters.")
@@ -713,7 +869,7 @@ else:
 
     if view == "Table":
         df = pd.DataFrame(filtered)
-        display_cols = ["ID", "Title", "Source", "Fleet", "Department", "Assigned To", "Effective", "Status"]
+        display_cols = ["ID", "Title", "Source", "Fleet", "Reg. Status", "Department", "Assigned To", "Effective", "Status"]
         event = st.dataframe(
             df[display_cols],
             use_container_width=True,
@@ -723,13 +879,14 @@ else:
             selection_mode="single-row",
             column_config={
                 "ID": st.column_config.NumberColumn("ID", width=50),
-                "Title": st.column_config.TextColumn("Title", width=260),
-                "Source": st.column_config.TextColumn("Source", width=120),
-                "Fleet": st.column_config.TextColumn("Fleet", width=130),
-                "Department": st.column_config.TextColumn("Department", width=130),
-                "Assigned To": st.column_config.TextColumn("Assigned To", width=140),
-                "Effective": st.column_config.TextColumn("Effective", width=100),
-                "Status": st.column_config.TextColumn("Status", width=100),
+                "Title": st.column_config.TextColumn("Title", width=240),
+                "Source": st.column_config.TextColumn("Source", width=110),
+                "Fleet": st.column_config.TextColumn("Fleet", width=120),
+                "Reg. Status": st.column_config.TextColumn("Reg. Status", width=130),
+                "Department": st.column_config.TextColumn("Department", width=120),
+                "Assigned To": st.column_config.TextColumn("Assigned To", width=130),
+                "Effective": st.column_config.TextColumn("Effective", width=95),
+                "Status": st.column_config.TextColumn("Status", width=90),
             },
         )
         if event.selection.rows:
@@ -754,11 +911,12 @@ else:
                         f'&nbsp;·&nbsp;<span>👤 {_card_assignee}</span>'
                         if _card_assignee and _card_assignee != "—" else ""
                     )
+                    _card_rs = row.get("Reg. Status", "Unknown")
                     st.markdown(f"""
 <div class="reg-card">
   <div class="reg-card-title">{_source_tag(row['Source'])}{row['Title']}</div>
   <div class="reg-card-meta" style="margin:4px 0">
-    {_status_badge(row['Status'])} &nbsp;
+    {_status_badge(row['Status'])} {_reg_status_badge(_card_rs)} &nbsp;
     <span>📅 {row['Effective']}</span> &nbsp;·&nbsp;
     <span>🏢 {row['Department']}</span>{_assignee_html}
   </div>
@@ -847,80 +1005,186 @@ if uploaded_pdf is not None:
                 )
                 all_obligations.extend(obs)
 
-            progress.progress(1.0, text="Saving to database…")
+            progress.empty()
 
-            # Dedup across chunks then save
-            from sqlalchemy import and_
-            seen: set[str] = set()
+            # Dedup within PDF by normalised title
+            seen_keys: set[str] = set()
             unique_obs = []
             for ob in all_obligations:
                 key = (ob.get("title") or "").strip().lower()
-                if key and key not in seen:
-                    seen.add(key)
+                if key and key not in seen_keys:
+                    seen_keys.add(key)
                     unique_obs.append(ob)
 
-            created, skipped, titles = 0, 0, []
-            with SessionLocal() as s:
-                for ob in unique_obs:
-                    title = (ob.get("title") or "").strip()
-                    if not title:
-                        continue
-                    existing = s.execute(
-                        select(Regulation).where(
-                            and_(
-                                Regulation.title == title,
-                                Regulation.source == (pdf_source_label.strip() or "PDF Upload"),
-                            )
-                        )
-                    ).scalar_one_or_none()
-                    if existing:
-                        skipped += 1
-                        continue
-                    reg = Regulation(
-                        title=title,
-                        source=pdf_source_label.strip() or "PDF Upload",
-                        summary=ob.get("description") or None,
-                        effective_date=ob.get("due_date") or None,
-                        category=join_multi(ob.get("departments") or []),
-                        fleet_tags=join_multi(ob.get("applicable_fleet") or []),
-                        jurisdiction="Global",
-                        status="Open",
-                    )
-                    s.add(reg)
-                    s.flush()
-                    s.add(RegulationLink(
-                        regulation_id=reg.id,
-                        url=uploaded_pdf.name,
-                        title=uploaded_pdf.name,
-                        link_type="pdf",
-                    ))
-                    created += 1
-                    titles.append(title)
-                s.commit()
-
-            progress.empty()
-
-            if created == 0 and skipped == 0:
+            if not unique_obs:
                 st.warning(
                     "No regulation items were extracted. "
                     "Check that the PDF contains structured regulatory content "
                     "(entry into force dates, MARPOL/SOLAS references, etc.)"
                 )
             else:
-                st.success(
-                    f"✓ **{created}** regulation(s) added &nbsp;·&nbsp; "
-                    f"**{skipped}** already existed &nbsp;·&nbsp; "
-                    f"**{n_chunks}** chunks processed"
-                )
-                if titles:
-                    with st.expander(f"View {len(titles)} extracted regulation(s)"):
-                        for i, t in enumerate(titles, 1):
-                            st.markdown(f"{i}. {t}")
-                if created:
-                    st.rerun()
+                # Build review table with duplicate flags
+                from sqlalchemy import and_
+                _source = pdf_source_label.strip() or "PDF Upload"
+                review_rows = []
+                with SessionLocal() as _rs:
+                    for ob in unique_obs:
+                        _t = (ob.get("title") or "").strip()
+                        if not _t:
+                            continue
+                        _exact = _rs.execute(
+                            select(Regulation).where(
+                                and_(Regulation.title == _t, Regulation.source == _source)
+                            )
+                        ).scalar_one_or_none()
+                        if _exact:
+                            _warn = "⚠️ Exact duplicate"
+                            _include = False
+                        else:
+                            _similar = _find_similar_regulations(_t, _source, _rs)
+                            if _similar:
+                                _best = _similar[0]
+                                _pct = int(_best["ratio"] * 100)
+                                _warn = f"≈ {_best['title'][:45]}… ({_pct}%)"
+                                _include = True
+                            else:
+                                _warn = ""
+                                _include = True
+                        _due = ob.get("due_date")
+                        _fs = ob.get("force_status") or "Unknown"
+                        review_rows.append({
+                            "Include": _include,
+                            "Title": _t,
+                            "Force Status": _fs,
+                            "Effective Date": str(_due) if _due else "",
+                            "Fleet": join_multi(ob.get("applicable_fleet") or []),
+                            "Department": join_multi(ob.get("departments") or []),
+                            "⚠️ Warning": _warn,
+                            "_ob": ob,   # carry full data for save
+                        })
+
+                # Store for save step
+                st.session_state["pending_regs"] = review_rows
+                st.session_state["pdf_source_label"] = _source
+                st.session_state["pdf_filename"] = uploaded_pdf.name
+                st.rerun()
 
         except Exception as _pdf_ex:
             st.error(f"PDF processing failed: {_pdf_ex}")
+
+# ── Review table (shown after extraction, before save) ────────────────────────
+if st.session_state.get("pending_regs") is not None:
+    _pending = st.session_state["pending_regs"]
+    _psource = st.session_state.get("pdf_source_label", "PDF Upload")
+    _pfname  = st.session_state.get("pdf_filename", "")
+
+    st.markdown(f"### 📋 Review Extracted Regulations — *{_psource}*")
+    st.caption(
+        f"**{len(_pending)} item(s)** extracted from **{_pfname}**. "
+        "Review below — uncheck any you don't want to save, or correct titles/dates. "
+        "Exact duplicates are pre-unchecked. Click **Save Selected** when ready."
+    )
+
+    # Build dataframe for editor (drop internal _ob key)
+    _display_pending = [
+        {k: v for k, v in row.items() if k != "_ob"}
+        for row in _pending
+    ]
+    _edited = st.data_editor(
+        pd.DataFrame(_display_pending),
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        column_config={
+            "Include":        st.column_config.CheckboxColumn("Include", width=70),
+            "Title":          st.column_config.TextColumn("Title", width=280),
+            "Force Status":   st.column_config.SelectboxColumn(
+                                  "Force Status", width=120,
+                                  options=["Unknown", "Draft", "Upcoming", "In Force"]
+                              ),
+            "Effective Date": st.column_config.TextColumn("Effective Date", width=110),
+            "Fleet":          st.column_config.TextColumn("Fleet", width=130),
+            "Department":     st.column_config.TextColumn("Department", width=130),
+            "⚠️ Warning":     st.column_config.TextColumn("⚠️ Warning", width=220),
+        },
+    )
+
+    _save_col2, _cancel_col = st.columns([1, 1])
+    with _save_col2:
+        if st.button("✓ Save Selected", type="primary", use_container_width=True):
+            from sqlalchemy import and_
+            created, skipped = 0, 0
+            titles = []
+            with SessionLocal() as _ss:
+                for idx, edited_row in _edited.iterrows():
+                    if not edited_row.get("Include", False):
+                        skipped += 1
+                        continue
+                    _t = str(edited_row.get("Title") or "").strip()
+                    if not _t:
+                        continue
+                    # Re-check exact dup after possible title edit
+                    _ex2 = _ss.execute(
+                        select(Regulation).where(
+                            and_(Regulation.title == _t, Regulation.source == _psource)
+                        )
+                    ).scalar_one_or_none()
+                    if _ex2:
+                        skipped += 1
+                        continue
+                    # Carry original AI data for fields not editable in table
+                    _orig_ob = _pending[idx]["_ob"] if idx < len(_pending) else {}
+                    _eff_raw = str(edited_row.get("Effective Date") or "").strip()
+                    _eff = None
+                    if _eff_raw:
+                        try:
+                            from dateutil.parser import parse as _dtp
+                            _eff = _dtp(_eff_raw).date()
+                        except Exception:
+                            pass
+                    _fs = str(edited_row.get("Force Status") or "Unknown")
+                    reg = Regulation(
+                        title=_t,
+                        source=_psource,
+                        summary=_orig_ob.get("description") or None,
+                        effective_date=_eff,
+                        category=join_multi(_orig_ob.get("departments") or []),
+                        fleet_tags=join_multi(_orig_ob.get("applicable_fleet") or []),
+                        jurisdiction="Global",
+                        status="Open",
+                        force_status=_fs,
+                        instruments=join_multi(_orig_ob.get("instruments") or []) or None,
+                        construction_restriction=_orig_ob.get("construction_restriction") or None,
+                        engine_restriction=_orig_ob.get("engine_restriction") or None,
+                    )
+                    _ss.add(reg)
+                    _ss.flush()
+                    _ss.add(RegulationLink(
+                        regulation_id=reg.id,
+                        url=_pfname,
+                        title=_pfname,
+                        link_type="pdf",
+                    ))
+                    created += 1
+                    titles.append(_t)
+                _ss.commit()
+
+            st.success(
+                f"✓ **{created}** regulation(s) saved &nbsp;·&nbsp; "
+                f"**{skipped}** skipped (unchecked or duplicate)"
+            )
+            st.session_state.pop("pending_regs", None)
+            st.session_state.pop("pdf_source_label", None)
+            st.session_state.pop("pdf_filename", None)
+            if created:
+                st.rerun()
+
+    with _cancel_col:
+        if st.button("✗ Cancel", use_container_width=True):
+            st.session_state.pop("pending_regs", None)
+            st.session_state.pop("pdf_source_label", None)
+            st.session_state.pop("pdf_filename", None)
+            st.rerun()
 
 st.divider()
 
