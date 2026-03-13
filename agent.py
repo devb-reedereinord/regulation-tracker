@@ -377,6 +377,22 @@ as a separate obligation. For each item return:
 
 - due_date: earliest entry into force date as YYYY-MM-DD, or null if not yet determined
 
+- force_status: lifecycle stage of the regulation itself \u2014
+    "In Force"  if the effective date has already passed or the text says "already in force" / "entered into force"
+    "Upcoming"  if a concrete future date is given (adopted but not yet effective)
+    "Draft"     if text says "proposed", "expected", "draft", "under development", "predicted"
+    "Unknown"   if unclear
+
+- instruments: list of formal adopting instrument names cited (Resolution numbers, Convention
+  amendment identifiers, etc.), e.g. ["MSC.474(101)", "MEPC.373(80)", "CLC Protocol 1992"].
+  Return [] if none are cited.
+
+- construction_restriction: free-text describing which vessel construction dates are in scope,
+  e.g. "ships constructed on or after 1 January 2024", or null if no restriction.
+
+- engine_restriction: free-text describing engine type/output scope,
+  e.g. "diesel engines with output \u2265 130 kW", or null if no restriction.
+
 - department: internal departments affected \u2014 choose only from
   ["Marine Ops", "Technical", "HSEQ", "Crewing", "Human Resources"]
 
@@ -391,6 +407,10 @@ Return ONLY valid JSON \u2014 no markdown fences, no text outside the JSON:
       "title": "...",
       "description": "...",
       "due_date": "YYYY-MM-DD or null",
+      "force_status": "In Force | Upcoming | Draft | Unknown",
+      "instruments": ["MSC.474(101)"],
+      "construction_restriction": "string or null",
+      "engine_restriction": "string or null",
       "department": ["HSEQ", "Technical"],
       "applicable_fleet": ["Tankers", "Bulk Carriers"]
     }}
@@ -422,6 +442,10 @@ Return ONLY valid JSON \u2014 no markdown fences, no commentary:
       "title": "short obligation title",
       "description": "markdown: overview sentence, **Key requirements:** bullets, **Applies to:**, **Entry into force:**, **Reederei Nord relevance:**",
       "due_date": "YYYY-MM-DD or null",
+      "force_status": "In Force | Upcoming | Draft | Unknown",
+      "instruments": ["instrument name"],
+      "construction_restriction": "string or null",
+      "engine_restriction": "string or null",
       "department": ["Marine Ops", "Technical", "HSEQ", "Crewing", "Human Resources"],
       "applicable_fleet": ["Container Vessels", "Bulk Carriers", "Tankers"]
     }}
@@ -430,6 +454,7 @@ Return ONLY valid JSON \u2014 no markdown fences, no commentary:
 
 Rules:
 - Only capture concrete compliance tasks.
+- force_status: "In Force" if date has passed, "Upcoming" if future date given, "Draft" if proposed/expected, else "Unknown".
 - applicable_fleet: subset of ["Container Vessels", "Bulk Carriers", "Tankers"] that this applies to.
 - Return an empty list if there are no obligations.
 
@@ -473,12 +498,18 @@ Attachment text: {(attachment_text or "")[:4000]}
                 due_date = None
 
         if title:
+            _force_raw = (item.get("force_status") or "Unknown").strip()
+            _force = _force_raw if _force_raw in ("In Force", "Upcoming", "Draft", "Unknown") else "Unknown"
             out.append({
                 "title": title,
                 "description": desc,
                 "due_date": due_date,
                 "departments": departments,
                 "applicable_fleet": applicable_fleet,
+                "force_status": _force,
+                "instruments": [str(x).strip() for x in (item.get("instruments") or []) if x],
+                "construction_restriction": (item.get("construction_restriction") or "").strip() or None,
+                "engine_restriction": (item.get("engine_restriction") or "").strip() or None,
             })
     return out
 
@@ -821,6 +852,22 @@ def ingest_once(limit: int = 50, dry_run: bool = False) -> dict:
             reg.category = join_multi(normalize_departments(depts))
             reg.fleet_tags = join_multi([f for f in fleet_tags_parts if f in FLEET_TYPES])
 
+            # New regulatory detail fields from AI
+            _force_vals = [ob.get("force_status") for ob in ai_obligations if ob.get("force_status")]
+            reg.force_status = _force_vals[0] if _force_vals else "Unknown"
+            _instr_parts: List[str] = []
+            _const_parts: List[str] = []
+            _eng_parts: List[str] = []
+            for ob in ai_obligations:
+                _instr_parts.extend(ob.get("instruments") or [])
+                if ob.get("construction_restriction"):
+                    _const_parts.append(ob["construction_restriction"])
+                if ob.get("engine_restriction"):
+                    _eng_parts.append(ob["engine_restriction"])
+            reg.instruments = join_multi(_instr_parts) or None
+            reg.construction_restriction = "; ".join(dict.fromkeys(_const_parts)) or None
+            reg.engine_restriction = "; ".join(dict.fromkeys(_eng_parts)) or None
+
             for ob in ai_obligations:
                 s.add(Action(
                     regulation_id=reg.id,
@@ -994,6 +1041,22 @@ def ingest_shared_mailbox(mailbox: str = None, limit: int = 100, dry_run: bool =
                 depts.append("HSEQ")
             reg.category = join_multi(normalize_departments(depts))
             reg.fleet_tags = join_multi([f for f in fleet_tags_parts if f in FLEET_TYPES])
+
+            # New regulatory detail fields from AI
+            _force_vals2 = [ob.get("force_status") for ob in ai_obligations if ob.get("force_status")]
+            reg.force_status = _force_vals2[0] if _force_vals2 else "Unknown"
+            _instr_p2: List[str] = []
+            _const_p2: List[str] = []
+            _eng_p2: List[str] = []
+            for ob in ai_obligations:
+                _instr_p2.extend(ob.get("instruments") or [])
+                if ob.get("construction_restriction"):
+                    _const_p2.append(ob["construction_restriction"])
+                if ob.get("engine_restriction"):
+                    _eng_p2.append(ob["engine_restriction"])
+            reg.instruments = join_multi(_instr_p2) or None
+            reg.construction_restriction = "; ".join(dict.fromkeys(_const_p2)) or None
+            reg.engine_restriction = "; ".join(dict.fromkeys(_eng_p2)) or None
 
             for ob in ai_obligations:
                 s.add(Action(
