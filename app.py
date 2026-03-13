@@ -123,6 +123,32 @@ hr { border-color: #1e2535 !important; margin: 1.5rem 0; }
 /* Expander */
 [data-testid="stExpander"] { background: #161b27; border: 1px solid #1e2535; border-radius: 10px; }
 
+/* ── Dropdown popup dark theme ── */
+[data-baseweb="popover"],
+[data-baseweb="popover"] ul,
+[data-baseweb="popover"] li {
+    background-color: #1e2535 !important;
+    border: 1px solid #334155 !important;
+}
+[data-baseweb="popover"] li *,
+[data-baseweb="popover"] [role="option"] * {
+    color: #ffffff !important;
+    background-color: transparent !important;
+}
+[data-baseweb="popover"] li:hover,
+[data-baseweb="popover"] [aria-selected="true"] {
+    background-color: #334155 !important;
+}
+
+/* ── Selectbox trigger box ── */
+[data-baseweb="select"] > div {
+    background-color: #161b27 !important;
+    border-color: #1e2535 !important;
+}
+[data-baseweb="select"] * {
+    color: #ffffff !important;
+}
+
 /* Info / warning / success / error */
 .stAlert { border-radius: 8px; border-left-width: 4px; }
 
