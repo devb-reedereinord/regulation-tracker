@@ -407,7 +407,7 @@ def load_regulations(status_filter=None, source_filter=None, search=None, fleet_
                 "Source": r.source or "—",
                 "Jurisdiction": r.jurisdiction or "—",
                 "Department": r.category or "—",
-                "Assigned To": r.assignee or "—",
+                "Assigned To": getattr(r, "assignee", None) or "—",
                 "Effective": str(r.effective_date) if r.effective_date else "—",
                 "Status": r.status or "N/A",
                 "Fleet": r.fleet_tags or "—",
@@ -549,7 +549,7 @@ def _render_detail_panel(reg_id: int):
         )
 
     # Reload reg.assignee fresh for display (it may have just been edited)
-    _assignee_display = reg.assignee or "—"
+    _assignee_display = getattr(reg, "assignee", None) or "—"
     _dept_display = reg.category or "—"
 
     st.markdown(
@@ -599,7 +599,7 @@ def _render_detail_panel(reg_id: int):
             with _ed2:
                 _new_assignee = st.text_input(
                     "Assigned To",
-                    value=reg.assignee or "",
+                    value=getattr(reg, "assignee", None) or "",
                     key=f"edit_assignee_{reg_id}",
                     placeholder="e.g. J. Smith, M. Lopez",
                     help="Separate multiple names with commas or semicolons",
