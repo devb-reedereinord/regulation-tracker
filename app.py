@@ -7,7 +7,7 @@ from difflib import SequenceMatcher
 from models import SessionLocal, Regulation, RegulationLink, KvStore, normalize_departments, join_multi
 
 from web_monitor import discover_articles
-from web_ingest import ingest_web_article
+from web_ingest import ingest_web_article, discover_and_preview_web_articles
 
 try:
     from agent import ingest_shared_mailbox, start_device_flow, complete_device_flow, get_token_cache_string, resummary_with_ai
@@ -933,23 +933,227 @@ st.divider()
 
 # ── Website scanner ───────────────────────────────────────────────────────────
 st.markdown("## Website Scanner")
-st.caption("Scans DNV, Gard, and IMO for newly published regulatory updates.")
+st.caption("Scans DNV and Gard for newly published regulatory updates. AI extracts structured data before you confirm.")
 
-if st.button("Scan Regulatory Websites", type="primary"):
-    with st.spinner("Scanning sources…"):
-        items = discover_articles()
-        new_items = 0
-        gard_debug = None
-        for item in items:
-            if item.get("_debug_headings") and gard_debug is None:
-                gard_debug = item["_debug_headings"]
-            if ingest_web_article(item):
-                new_items += 1
+_wscan_btn_col, _wscan_cancel_col = st.columns([2, 1])
+with _wscan_btn_col:
+    _do_scan = st.button("🔍 Scan Regulatory Websites", type="primary", use_container_width=True)
+with _wscan_cancel_col:
+    if st.session_state.get("pending_web_regs") is not None:
+        if st.button("✗ Cancel", use_container_width=True):
+            st.session_state.pop("pending_web_regs", None)
+            st.rerun()
 
-    st.success(f"✓ {new_items} new regulatory update(s) discovered.")
-    if gard_debug is not None and new_items == 0:
-        with st.expander("GARD page headings (diagnosis)"):
-            st.write(gard_debug or "(none found — page may be JavaScript-rendered)")
+if _do_scan:
+    _raw_previews = []
+    _scan_status = st.empty()
+    _scan_progress = st.progress(0, text="Discovering articles…")
+
+    try:
+        # Phase 1: discover all article URLs
+        _scan_status.info("Discovering articles from DNV and Gard…")
+        _all_items = discover_articles()
+        _total = len(_all_items)
+        _scan_status.info(f"Found **{_total}** article(s). Running AI extraction…")
+
+        # Phase 2: download + AI extract each
+        from web_ingest import download_article, _extract_web_article_with_ai
+        from models import join_multi as _jm
+
+        for _idx, _item in enumerate(_all_items):
+            _scan_progress.progress(
+                (_idx + 1) / max(_total, 1),
+                text=f"AI processing article {_idx + 1} of {_total}…"
+            )
+            _clean = {k: v for k, v in _item.items() if not k.startswith("_")}
+
+            # Gard structured digest items
+            if _clean.get("item_title"):
+                _raw_previews.append({
+                    "_ob": _clean,
+                    "_url": _clean.get("source_url", ""),
+                    "_source": _clean.get("publisher") or _clean.get("source_name") or "Gard",
+                    "is_skip": False,
+                    "title": _clean["item_title"],
+                    "due_date": _clean.get("effective_date") or "",
+                    "force_status": "Unknown",
+                    "fleet": _jm(_clean.get("applicable_fleet") or []) or "—",
+                    "dept": _jm(_clean.get("departments") or ["HSEQ"]),
+                })
+                continue
+
+            # Plain article URL items
+            _url = _clean.get("source_url") or _clean.get("url")
+            if not _url:
+                continue
+            _src = _clean.get("publisher") or _clean.get("source") or "Web"
+            _atitle, _atext = download_article(_url)
+            if not _atitle:
+                continue
+            _ai = _extract_web_article_with_ai(_atitle, _atext or "", _url, _src)
+            _raw_previews.append({
+                "_ob": {**_clean, **_ai, "_original_url": _url},
+                "_url": _url,
+                "_source": _src,
+                "is_skip": bool(_ai.get("skip")),
+                "title": (_ai.get("title") or _atitle)[:250],
+                "due_date": _ai.get("due_date") or "",
+                "force_status": _ai.get("force_status") or "Unknown",
+                "fleet": _jm(_ai.get("applicable_fleet") or []) or "—",
+                "dept": _jm(_ai.get("departments") or ["HSEQ"]),
+            })
+
+        _scan_progress.empty()
+        _scan_status.empty()
+
+        # Check duplicates
+        _regulatory = [p for p in _raw_previews if not p["is_skip"]]
+        _skipped_ai = len(_raw_previews) - len(_regulatory)
+
+        with SessionLocal() as _chk_s:
+            from sqlalchemy import and_
+            for p in _regulatory:
+                _ex = _chk_s.execute(
+                    select(Regulation).where(
+                        and_(Regulation.title == p["title"],
+                             Regulation.source == p["_source"])
+                    )
+                ).scalar_one_or_none()
+                p["_warning"] = "Exact duplicate — will skip" if _ex else ""
+                p["_include"] = not bool(_ex)
+
+        # Store for review step
+        st.session_state["pending_web_regs"] = _regulatory
+        st.session_state["web_skipped_ai"] = _skipped_ai
+        st.rerun()
+
+    except Exception as _scan_err:
+        _scan_progress.empty()
+        _scan_status.error(f"Scan failed: {_scan_err}")
+
+
+# ── Web scan review table ─────────────────────────────────────────────────────
+if st.session_state.get("pending_web_regs") is not None:
+    _wpending = st.session_state["pending_web_regs"]
+    _wskipped = st.session_state.get("web_skipped_ai", 0)
+
+    st.markdown(f"### 🌐 Review Scanned Articles")
+    _winfo_parts = [f"**{len(_wpending)} regulatory article(s)** found"]
+    if _wskipped:
+        _winfo_parts.append(f"**{_wskipped}** non-regulatory article(s) discarded by AI")
+    st.caption(" · ".join(_winfo_parts) + ". Uncheck items you don't want to save, then click **Save Selected**.")
+
+    _wdisplay = [{
+        "Include":        p["_include"],
+        "Title":          p["title"],
+        "Source":         p["_source"],
+        "Force Status":   p["force_status"],
+        "Effective Date": p["due_date"],
+        "Fleet":          p["fleet"],
+        "Department":     p["dept"],
+        "⚠️ Warning":     p["_warning"],
+    } for p in _wpending]
+
+    _wedited = st.data_editor(
+        pd.DataFrame(_wdisplay),
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        column_config={
+            "Include":        st.column_config.CheckboxColumn("Include", width=70),
+            "Title":          st.column_config.TextColumn("Title", width=300),
+            "Source":         st.column_config.TextColumn("Source", width=80),
+            "Force Status":   st.column_config.SelectboxColumn(
+                                  "Force Status", width=120,
+                                  options=["Unknown", "Draft", "Upcoming", "In Force"]
+                              ),
+            "Effective Date": st.column_config.TextColumn("Effective Date", width=110),
+            "Fleet":          st.column_config.TextColumn("Fleet", width=130),
+            "Department":     st.column_config.TextColumn("Department", width=120),
+            "⚠️ Warning":     st.column_config.TextColumn("⚠️ Warning", width=220),
+        },
+        key="web_review_editor",
+    )
+
+    _wsave_col, _wcancel_col = st.columns([1, 1])
+    with _wsave_col:
+        if st.button("✓ Save Selected", type="primary", use_container_width=True, key="web_save_btn"):
+            from sqlalchemy import and_
+            from models import join_multi as _jm2
+            _wcreated, _wskip2 = 0, 0
+            with SessionLocal() as _wss:
+                for _widx, _wrow in _wedited.iterrows():
+                    if not _wrow.get("Include", False):
+                        _wskip2 += 1
+                        continue
+                    _wt = str(_wrow.get("Title") or "").strip()
+                    if not _wt:
+                        continue
+                    _wsrc = str(_wrow.get("Source") or "Web")
+                    _wex = _wss.execute(
+                        select(Regulation).where(
+                            and_(Regulation.title == _wt, Regulation.source == _wsrc)
+                        )
+                    ).scalar_one_or_none()
+                    if _wex:
+                        _wskip2 += 1
+                        continue
+
+                    _wob = _wpending[_widx]["_ob"] if _widx < len(_wpending) else {}
+                    _weff_raw = str(_wrow.get("Effective Date") or "").strip()
+                    _weff = None
+                    if _weff_raw:
+                        try:
+                            from dateutil.parser import parse as _wdtp
+                            _weff = _wdtp(_weff_raw).date()
+                        except Exception:
+                            pass
+                    _wfs = str(_wrow.get("Force Status") or "Unknown")
+
+                    _wreg = Regulation(
+                        title=_wt,
+                        source=_wsrc,
+                        summary=_wob.get("description") or None,
+                        effective_date=_weff,
+                        category=str(_wrow.get("Department") or "HSEQ"),
+                        jurisdiction="Global",
+                        status="Open",
+                    )
+                    _safe_set_fn = lambda obj, attr, val: setattr(obj, attr, val) if hasattr(obj, attr) else None
+                    _safe_set_fn(_wreg, "fleet_tags",               str(_wrow.get("Fleet") or "") or None)
+                    _safe_set_fn(_wreg, "force_status",             _wfs)
+                    _safe_set_fn(_wreg, "instruments",              _jm2(_wob.get("instruments") or []) or None)
+                    _safe_set_fn(_wreg, "construction_restriction", _wob.get("construction_restriction") or None)
+                    _safe_set_fn(_wreg, "engine_restriction",       _wob.get("engine_restriction") or None)
+
+                    _wss.add(_wreg)
+                    _wss.flush()
+
+                    _wurl = _wpending[_widx]["_url"] if _widx < len(_wpending) else ""
+                    if _wurl:
+                        _wss.add(RegulationLink(
+                            regulation_id=_wreg.id,
+                            url=_wurl,
+                            link_type="news",
+                            title="Source article",
+                        ))
+                    _wcreated += 1
+
+                _wss.commit()
+
+            st.success(
+                f"✓ **{_wcreated}** regulation(s) saved &nbsp;·&nbsp; "
+                f"**{_wskip2}** skipped (unchecked or duplicate)"
+            )
+            st.session_state.pop("pending_web_regs", None)
+            st.session_state.pop("web_skipped_ai", None)
+            st.rerun()
+
+    with _wcancel_col:
+        if st.button("✗ Cancel", use_container_width=True, key="web_cancel_btn2"):
+            st.session_state.pop("pending_web_regs", None)
+            st.session_state.pop("web_skipped_ai", None)
+            st.rerun()
 
 st.divider()
 
