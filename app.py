@@ -9,6 +9,24 @@ from models import SessionLocal, Regulation, RegulationLink, KvStore, normalize_
 from web_monitor import discover_articles
 from web_ingest import ingest_web_article, discover_and_preview_web_articles
 
+# ── Playwright browser install (once per deployment) ─────────────────────────
+# `pip install playwright` downloads the Python bindings but NOT the browser
+# binaries.  This cached call installs Chromium the first time the app starts
+# on a new server (Streamlit Cloud, fresh container, etc.).
+@st.cache_resource(show_spinner=False)
+def _ensure_playwright_browsers():
+    import subprocess, sys
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            capture_output=True, text=True, timeout=120
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+_ensure_playwright_browsers()
+
 try:
     from agent import ingest_shared_mailbox, start_device_flow, complete_device_flow, get_token_cache_string, resummary_with_ai
     from config import SHARED_MAILBOX, GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET, EDIT_PASSWORD
