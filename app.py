@@ -132,36 +132,62 @@ hr { border-color: #1e2535 !important; margin: 1.5rem 0; }
 }
 
 /* ── Date picker calendar popup ── */
+/* Root container */
 [data-baseweb="calendar"] {
     background-color: #1e2535 !important;
     border: 1px solid #334155 !important;
+    border-radius: 10px !important;
 }
-[data-baseweb="calendar"] * {
-    color: #ffffff !important;
-    background-color: transparent !important;
-}
-[data-baseweb="calendar"] [data-baseweb="month-header"] *,
+/* Every element inside: dark bg, white text */
+[data-baseweb="calendar"] div,
+[data-baseweb="calendar"] table,
+[data-baseweb="calendar"] thead,
+[data-baseweb="calendar"] tbody,
+[data-baseweb="calendar"] tr,
+[data-baseweb="calendar"] td,
+[data-baseweb="calendar"] th,
+[data-baseweb="calendar"] span,
 [data-baseweb="calendar"] button {
+    background-color: #1e2535 !important;
     color: #ffffff !important;
+    border-color: #334155 !important;
+}
+/* Day cells — transparent background on cell and ALL descendants */
+[data-baseweb="calendar-day"],
+[data-baseweb="calendar-day"] * {
     background-color: transparent !important;
-}
-[data-baseweb="calendar"] button:hover {
-    background-color: #334155 !important;
-}
-[data-baseweb="calendar"] [aria-selected="true"],
-[data-baseweb="calendar"] [aria-pressed="true"] {
-    background-color: #1d4ed8 !important;
     color: #ffffff !important;
 }
-[data-baseweb="calendar"] [data-baseweb="day"]:hover {
+/* Hover on day */
+[data-baseweb="calendar-day"]:hover,
+[data-baseweb="calendar-day"]:hover * {
     background-color: #334155 !important;
+    border-radius: 50% !important;
 }
-/* Month/year selects inside calendar */
+/* Selected day — blue fill */
+[data-baseweb="calendar-day"][aria-selected="true"],
+[data-baseweb="calendar-day"][aria-selected="true"] * {
+    background-color: #1d4ed8 !important;
+    border-radius: 50% !important;
+    color: #ffffff !important;
+}
+/* Today indicator — blue outline, transparent fill */
+[data-baseweb="calendar-day"][aria-current="date"],
+[data-baseweb="calendar-day"][aria-current="date"] * {
+    background-color: transparent !important;
+    border: 2px solid #60a5fa !important;
+    border-radius: 50% !important;
+    color: #ffffff !important;
+}
+/* Month/year header selects */
 [data-baseweb="calendar"] select,
+[data-baseweb="month-year-select-popover"],
 [data-baseweb="month-year-select-popover"] * {
     background-color: #1e2535 !important;
     color: #ffffff !important;
 }
+/* Nav arrows */
+[data-baseweb="calendar"] [data-baseweb="icon"] { fill: #ffffff !important; }
 
 /* ── Dropdown popup dark theme ── */
 [data-baseweb="popover"],
