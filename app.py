@@ -123,6 +123,46 @@ hr { border-color: #1e2535 !important; margin: 1.5rem 0; }
 /* Expander */
 [data-testid="stExpander"] { background: #161b27; border: 1px solid #1e2535; border-radius: 10px; }
 
+/* ── Date input field ── */
+[data-testid="stDateInput"] input,
+[data-baseweb="input"] input {
+    background: #161b27 !important;
+    color: #ffffff !important;
+    border: 1px solid #1e2535 !important;
+}
+
+/* ── Date picker calendar popup ── */
+[data-baseweb="calendar"] {
+    background-color: #1e2535 !important;
+    border: 1px solid #334155 !important;
+}
+[data-baseweb="calendar"] * {
+    color: #ffffff !important;
+    background-color: transparent !important;
+}
+[data-baseweb="calendar"] [data-baseweb="month-header"] *,
+[data-baseweb="calendar"] button {
+    color: #ffffff !important;
+    background-color: transparent !important;
+}
+[data-baseweb="calendar"] button:hover {
+    background-color: #334155 !important;
+}
+[data-baseweb="calendar"] [aria-selected="true"],
+[data-baseweb="calendar"] [aria-pressed="true"] {
+    background-color: #1d4ed8 !important;
+    color: #ffffff !important;
+}
+[data-baseweb="calendar"] [data-baseweb="day"]:hover {
+    background-color: #334155 !important;
+}
+/* Month/year selects inside calendar */
+[data-baseweb="calendar"] select,
+[data-baseweb="month-year-select-popover"] * {
+    background-color: #1e2535 !important;
+    color: #ffffff !important;
+}
+
 /* ── Dropdown popup dark theme ── */
 [data-baseweb="popover"],
 [data-baseweb="popover"] ul,
