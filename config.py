@@ -72,3 +72,7 @@ SENDER_NOTIFY = {
 # --- UI constants (share with models/helpers) ---
 DEPARTMENTS = ["Crewing", "Marine Ops", "Technical", "Human Resourses", "HSEQ"]  # requested spelling
 REG_STATUS_OPTIONS = ["Open", "In Progress", "Closed", "N/A"]
+
+# --- Edit password gate ---
+# Protects Department & Assignee edits in the detail panel
+EDIT_PASSWORD = _get("edit_password", "")
