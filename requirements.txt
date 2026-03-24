@@ -10,3 +10,4 @@ msal
 pypdf
 cryptography
 playwright
+psycopg2-binary
