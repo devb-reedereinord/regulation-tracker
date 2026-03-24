@@ -21,9 +21,9 @@ def _ensure_playwright_browsers():
             [sys.executable, "-m", "playwright", "install", "chromium"],
             capture_output=True, text=True, timeout=120
         )
-        return result.returncode == 0
-    except Exception:
-        return False
+        return result.returncode == 0, result.stderr or ""
+    except Exception as _e:
+        return False, str(_e)
 
 _ensure_playwright_browsers()
 
@@ -810,7 +810,11 @@ def _render_detail_panel(reg_id: int):
             if str(lnk.url or "").startswith("http"):
                 st.markdown(f"{icon} [{lnk.title or lnk.url}]({lnk.url})")
             else:
-                st.markdown(f"📎 {lnk.title or lnk.url}")
+                st.markdown(
+                    f'<span style="color:#94a3b8;font-size:0.85rem;">📄 Source document: '
+                    f'<code>{lnk.title or lnk.url}</code></span>',
+                    unsafe_allow_html=True,
+                )
 
     # ── Status + delete + re-summarize actions ──
     st.markdown("---")
@@ -952,6 +956,13 @@ st.divider()
 # ── Website scanner ───────────────────────────────────────────────────────────
 st.markdown("## Website Scanner")
 st.caption("Scans DNV and Gard for newly published regulatory updates. AI extracts structured data before you confirm.")
+
+_pw_ok, _pw_err = _ensure_playwright_browsers()
+if not _pw_ok:
+    st.warning(
+        f"⚠️ Playwright browser could not be installed — web scanning may return fewer results "
+        f"(JS-rendered pages will be skipped). Error: {_pw_err[:200] if _pw_err else 'unknown'}"
+    )
 
 _wscan_btn_col, _wscan_cancel_col = st.columns([2, 1])
 with _wscan_btn_col:
@@ -1153,7 +1164,7 @@ if st.session_state.get("pending_web_regs") is not None:
                             regulation_id=_wreg.id,
                             url=_wurl,
                             link_type="news",
-                            title="Source article",
+                            title=_wt or _wurl,
                         ))
                     _wcreated += 1
 
