@@ -4,7 +4,7 @@ from typing import Dict, List
 
 from web_sources import WEB_SOURCES
 from web_scrapers.dnv_scraper import discover_dnv_articles
-from web_scrapers.gard_digest_scraper import discover_gard_digest_items
+from web_scrapers.gard_digest_scraper import discover_gard_articles
 
 
 def discover_articles() -> List[Dict]:
@@ -12,12 +12,12 @@ def discover_articles() -> List[Dict]:
 
     for source in WEB_SOURCES:
         try:
-            if source["type"] == "gard_digest":
-                items = discover_gard_digest_items(source["base_url"])
-                discovered.extend(items)
-
-            elif source["type"] == "dnv_index":
-                links = discover_dnv_articles(source["base_url"])
+            if source["type"] in ("gard_index", "dnv_index"):
+                # Both scrapers return a plain list of article URLs
+                if source["type"] == "gard_index":
+                    links = discover_gard_articles(source["base_url"])
+                else:
+                    links = discover_dnv_articles(source["base_url"])
 
                 for link in links:
                     discovered.append(
@@ -34,3 +34,4 @@ def discover_articles() -> List[Dict]:
             print(f"Error scraping {source['name']}: {exc}")
 
     return discovered
+
