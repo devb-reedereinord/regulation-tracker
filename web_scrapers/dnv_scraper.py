@@ -27,8 +27,7 @@ def _fetch_html_playwright(url: str) -> str:
         page = browser.new_page(extra_http_headers={
             "Accept-Language": "en-US,en;q=0.9",
         })
-        page.goto(url, timeout=30_000, wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)   # wait for JS card hydration
+        page.goto(url, timeout=45_000, wait_until="networkidle")
         html = page.content()
         browser.close()
     return html
