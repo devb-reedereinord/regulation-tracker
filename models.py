@@ -134,10 +134,13 @@ class KvStore(Base):
 # --- DB init & seed ---
 Base.metadata.create_all(engine)
 
-# Auto-migrate: add missing columns (SQLite safe - ALTER TABLE ADD COLUMN is idempotent via check)
-from sqlalchemy import text as _text
+# Auto-migrate: add missing columns using sqlalchemy.inspect (works for both SQLite and PostgreSQL)
+from sqlalchemy import text as _text, inspect as _inspect
 with engine.connect() as _conn:
-    _cols = [row[1] for row in _conn.execute(_text("PRAGMA table_info(regulations)"))]
+    try:
+        _cols = [c["name"] for c in _inspect(engine).get_columns("regulations")]
+    except Exception:
+        _cols = []
     for _col_name, _col_def in [
         ("fleet_tags",               "TEXT"),
         ("assignee",                 "TEXT"),
