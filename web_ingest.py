@@ -18,6 +18,7 @@ HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.5",
+    "Referer": "https://www.google.com/",
 }
 
 
@@ -141,6 +142,14 @@ def _reg_exists(s, title: str, source: str) -> bool:
     return bool(row)
 
 
+def _url_exists(s, url: str) -> bool:
+    """Check if a URL has already been ingested (exists in RegulationLink)."""
+    row = s.execute(
+        select(RegulationLink.id).where(RegulationLink.url == url).limit(1)
+    ).first()
+    return bool(row)
+
+
 def _safe_set(obj, attr: str, val) -> None:
     """Set attribute only if the ORM model actually has it (guards against stale deployments)."""
     if hasattr(obj, attr):
@@ -209,6 +218,11 @@ def ingest_web_article(item: Dict) -> bool:
         # ── Case 2: plain article URL (DNV / other) ───────────────────────────
         url = item.get("source_url") or item.get("url")
         if not url:
+            return False
+
+        # Fast URL-based dedup: skip download + AI if already ingested
+        if _url_exists(s, url):
+            print(f"[INGEST] Already seen URL, skipping: {url}")
             return False
 
         source = item.get("publisher") or item.get("source") or "Web"
@@ -291,6 +305,11 @@ def discover_and_preview_web_articles() -> list[dict]:
         url = clean.get("source_url") or clean.get("url")
         if not url:
             continue
+
+        # Skip URLs already in the DB
+        with SessionLocal() as _s:
+            if _url_exists(_s, url):
+                continue
 
         source = clean.get("publisher") or clean.get("source") or "Web"
         article_title, text = download_article(url)
