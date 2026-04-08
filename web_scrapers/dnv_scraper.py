@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
 
 import requests
 from bs4 import BeautifulSoup
@@ -17,11 +19,40 @@ HEADERS = {
 
 # Individual article URLs: /news/YYYY/article-slug/
 _ARTICLE_RE = re.compile(r"/news/\d{4}/[^/\s]+/?$", re.I)
+_PLAYWRIGHT_CHROMIUM_READY: bool | None = None
 
 
-def _fetch_html_playwright(url: str) -> str:
-    """Render the DNV listing page with headless Chromium so JS card links are present."""
+def _ensure_playwright_chromium() -> bool:
+    """
+    Ensure Chromium binaries used by Playwright are present.
+
+    Useful in ephemeral environments where browser caches are wiped between runs.
+    """
+    global _PLAYWRIGHT_CHROMIUM_READY
+    if _PLAYWRIGHT_CHROMIUM_READY is not None:
+        return _PLAYWRIGHT_CHROMIUM_READY
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        _PLAYWRIGHT_CHROMIUM_READY = result.returncode == 0
+        if not _PLAYWRIGHT_CHROMIUM_READY:
+            err = (result.stderr or result.stdout or "unknown error").strip()
+            print(f"[DNV] Playwright Chromium install failed: {err[:300]}")
+    except Exception as exc:
+        _PLAYWRIGHT_CHROMIUM_READY = False
+        print(f"[DNV] Playwright Chromium install exception: {exc}")
+
+    return _PLAYWRIGHT_CHROMIUM_READY
+
+
+def _render_dnv_html(url: str) -> str:
     from playwright.sync_api import sync_playwright
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(extra_http_headers={
@@ -31,6 +62,26 @@ def _fetch_html_playwright(url: str) -> str:
         html = page.content()
         browser.close()
     return html
+
+
+def _fetch_html_playwright(url: str) -> str:
+    """
+    Render the DNV listing page with headless Chromium so JS card links are present.
+
+    Retries once after installing Chromium if browser binaries are missing.
+    """
+    try:
+        return _render_dnv_html(url)
+    except Exception as first_err:
+        err_msg = str(first_err)
+        if "Executable doesn't exist" not in err_msg:
+            raise
+
+        print("[DNV] Playwright Chromium missing; attempting one-time install.")
+        if not _ensure_playwright_chromium():
+            raise
+
+        return _render_dnv_html(url)
 
 
 def _fetch_html_requests(url: str) -> str:
