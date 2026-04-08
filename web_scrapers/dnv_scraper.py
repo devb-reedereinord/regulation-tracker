@@ -20,6 +20,8 @@ HEADERS = {
 
 # DNV article URL patterns vary over time; keep matcher intentionally broad.
 _ARTICLE_YEAR_NEWS_RE = re.compile(r"/news/\d{4}/", re.I)
+# Individual article URLs: /news/YYYY/article-slug/
+_ARTICLE_RE = re.compile(r"/news/\d{4}/[^/\s]+/?$", re.I)
 _PLAYWRIGHT_CHROMIUM_READY: bool | None = None
 
 
