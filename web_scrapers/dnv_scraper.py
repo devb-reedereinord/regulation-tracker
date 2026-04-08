@@ -35,8 +35,11 @@ def _fetch_html_playwright(url: str) -> str:
 
 def _fetch_html_requests(url: str) -> str:
     """Fallback plain HTTP fetch."""
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    return r.text if r.status_code == 200 else ""
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        return r.text if r.status_code == 200 else ""
+    except Exception:
+        return ""
 
 
 def discover_dnv_articles(url: str) -> list[str]:
@@ -46,12 +49,20 @@ def discover_dnv_articles(url: str) -> list[str]:
 
     Uses Playwright to render JS-loaded article cards; falls back to requests.
     Article links follow /news/YYYY/slug/ not the index URL itself.
+
+    NOTE: DNV's listing page is fully JS-rendered. Plain requests will return
+    0 results. If Playwright is unavailable, install it with:
+        pip install playwright && playwright install chromium
     """
     # Try Playwright first (handles JS-rendered article card links)
     try:
         html = _fetch_html_playwright(url)
     except Exception as _pw_err:
-        print(f"[DNV] Playwright unavailable ({_pw_err}), falling back to requests.")
+        print(
+            f"[DNV] Playwright unavailable ({_pw_err}). "
+            "DNV requires Playwright to render JS content. "
+            "Fix: pip install playwright && playwright install chromium"
+        )
         html = _fetch_html_requests(url)
 
     if not html:
