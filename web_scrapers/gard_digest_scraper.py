@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import xml.etree.ElementTree as ET
 
 import requests
 from bs4 import BeautifulSoup
@@ -22,6 +23,14 @@ _ARTICLE_RE = re.compile(
     r"gard\.no/(en/)?(insights|articles)/[^/\s?#]{4,}/?$",
     re.I,
 )
+
+# Known Gard RSS/Atom feed candidates (tried in order)
+_GARD_RSS_URLS = [
+    "https://www.gard.no/rss/",
+    "https://gard.no/rss/",
+    "https://www.gard.no/feed/",
+    "https://gard.no/feed/",
+]
 
 
 def _fetch_html_playwright(url: str) -> str:
@@ -47,36 +56,100 @@ def _fetch_html_requests(url: str) -> str:
         return ""
 
 
+def _fetch_gard_rss() -> list[str]:
+    """
+    Try known Gard RSS/Atom feed URLs and extract article links.
+    Returns a deduplicated list of article URLs, or [] if all feeds fail.
+    """
+    atom_ns = "http://www.w3.org/2005/Atom"
+    for rss_url in _GARD_RSS_URLS:
+        try:
+            r = requests.get(rss_url, headers=HEADERS, timeout=15)
+            if r.status_code != 200:
+                continue
+            content = r.text
+            if "<rss" not in content and "<feed" not in content and "<channel" not in content:
+                continue
+            root = ET.fromstring(content)
+            links: list[str] = []
+
+            # RSS 2.0: //channel/item/link
+            for item in root.iter("item"):
+                link_el = item.find("link")
+                if link_el is not None and link_el.text:
+                    href = link_el.text.strip()
+                    if _ARTICLE_RE.search(href):
+                        links.append(href)
+
+            # Atom: //entry/link[@href]
+            for entry in root.iter(f"{{{atom_ns}}}entry"):
+                link_el = entry.find(f"{{{atom_ns}}}link")
+                if link_el is not None:
+                    href = link_el.get("href", "")
+                    if href and _ARTICLE_RE.search(href):
+                        links.append(href)
+
+            if links:
+                found = list(dict.fromkeys(links))
+                print(f"[GARD] RSS fallback: {len(found)} links from {rss_url}")
+                return found
+        except Exception as e:
+            print(f"[GARD] RSS attempt failed ({rss_url}): {e}")
+            continue
+    return []
+
+
 def discover_gard_articles(url: str) -> list[str]:
     """
     Scrape the Gard articles/insights listing page and return a deduplicated
     list of individual article URLs.
 
-    Uses Playwright to render JS-loaded article cards; falls back to requests.
-    Article links follow /en/insights/slug/ or /en/articles/slug/ patterns.
+    Priority: Playwright (JS-rendered) → RSS feed → plain requests HTML.
     """
-    # Try Playwright first (handles JS-rendered card links)
+    # 1. Try Playwright (handles JS-rendered card links)
     try:
         html = _fetch_html_playwright(url)
     except Exception as _pw_err:
-        print(f"[GARD] Playwright unavailable ({_pw_err}), falling back to requests.")
-        html = _fetch_html_requests(url)
+        print(f"[GARD] Playwright unavailable ({_pw_err}), trying RSS fallback.")
+        html = ""
 
+    # Extract links from Playwright HTML if we got it
+    if html:
+        soup = BeautifulSoup(html, "lxml")
+        links: list[str] = []
+        for a in soup.select("a[href]"):
+            href = a.get("href", "")
+            if href.startswith("/"):
+                href = "https://gard.no" + href
+            if _ARTICLE_RE.search(href):
+                links.append(href)
+        found = list(dict.fromkeys(links))
+        if found:
+            print(f"[GARD] Found {len(found)} article links via Playwright from {url}")
+            return found
+        print("[GARD] Playwright returned HTML but 0 matching links — trying RSS.")
+
+    # 2. Try RSS feed (works without Playwright)
+    rss_links = _fetch_gard_rss()
+    if rss_links:
+        return rss_links
+
+    # 3. Last resort: plain requests HTML parse
+    print("[GARD] Falling back to plain requests HTML parse.")
+    html = _fetch_html_requests(url)
     if not html:
         print("[GARD] No HTML returned — 0 articles found.")
         return []
 
     soup = BeautifulSoup(html, "lxml")
-    links: list[str] = []
-
+    links = []
     for a in soup.select("a[href]"):
         href = a.get("href", "")
-        # Normalise relative URLs
         if href.startswith("/"):
             href = "https://gard.no" + href
         if _ARTICLE_RE.search(href):
             links.append(href)
 
-    found = list(dict.fromkeys(links))   # deduplicate, preserve order
+    found = list(dict.fromkeys(links))
     print(f"[GARD] Found {len(found)} article links from {url}")
     return found
