@@ -14,7 +14,7 @@ def discover_articles() -> List[Dict]:
     for source in WEB_SOURCES:
         try:
             source_type = source["type"]
-            if source_type == "gard_index":
+            if source_type in {"gard_digest", "gard_index"}:
                 links = discover_gard_articles(source["base_url"])
             elif source_type == "dnv_index":
                 links = discover_dnv_articles(source["base_url"])
