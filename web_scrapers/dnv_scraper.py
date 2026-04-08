@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -17,6 +18,8 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.5",
 }
 
+# DNV article URL patterns vary over time; keep matcher intentionally broad.
+_ARTICLE_YEAR_NEWS_RE = re.compile(r"/news/\d{4}/", re.I)
 # Individual article URLs: /news/YYYY/article-slug/
 _ARTICLE_RE = re.compile(r"/news/\d{4}/[^/\s]+/?$", re.I)
 _PLAYWRIGHT_CHROMIUM_READY: bool | None = None
@@ -122,13 +125,39 @@ def discover_dnv_articles(url: str) -> list[str]:
     soup = BeautifulSoup(html, "lxml")
     links: list[str] = []
 
-    for a in soup.select("a[href]"):
-        href = a.get("href", "")
-        if not _ARTICLE_RE.search(href):
+    def _normalize(href: str) -> str:
+        # Build absolute URL, strip query/fragment for stable deduplication.
+        absolute = urljoin(url, href)
+        parts = urlsplit(absolute)
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+    def _is_dnv_article(href: str) -> bool:
+        if not href:
+            return False
+        normalized = _normalize(href)
+        parts = urlsplit(normalized)
+        if "dnv.com" not in parts.netloc.lower():
+            return False
+
+        path = parts.path.lower()
+        # Exclude listing pages and generic hubs.
+        if path.rstrip("/") in {
+            "/maritime/technical-regulatory-news",
+            "/maritime/news",
+            "/news",
+        }:
+            return False
+
+        # Prefer year-based news paths, but allow broader maritime news URLs.
+        return bool(
+            _ARTICLE_YEAR_NEWS_RE.search(path)
+            or ("/maritime/news/" in path and len(path.strip("/").split("/")) >= 4)
+        )
+
+    for a in soup.select("a[href], [data-href]"):
+        href = a.get("href") or a.get("data-href") or ""
+        if not _is_dnv_article(href):
             continue
-        if href.startswith("/"):
-            href = "https://www.dnv.com" + href
-        if href.startswith("https://www.dnv.com"):
-            links.append(href)
+        links.append(_normalize(href))
 
     return list(dict.fromkeys(links))   # deduplicate, preserve order
